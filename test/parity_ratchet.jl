@@ -312,15 +312,15 @@ const LOCKS = [
             count(p -> occursin(p, all_src), forbidden) +
                 count(p -> !occursin(p, all_src), required)
         end),
-    "L79_partial_new_requires_definite_initialization" => ("Wasm physical defaults for missing primitive fields are emitted only when a closed-world CFG must-analysis proves every field is written before read or escape",
+    "L79_partial_new_missing_fields_take_physical_defaults" => ("every field a partial %new leaves out takes the default of its physical slot — null for a reference, zero for a numeric — the same value for every type, with no proof obligation",
         () -> begin
             stmts_src = read(joinpath(CODEGEN, "statements.jl"), String)
-            test_src = read(joinpath(ROOT, "test", "no_fabricated_values.jl"), String)
-            forbidden = ["struct_type === Random.Xoshiro", "nameof(struct_type)",
-                         "primitive_init_proven = true", "allow_uninitialized"]
-            required = ["function _definitely_initializes_in_ir", "intersect(incoming[dest], assigned)",
-                        "_partial_new_is_definitely_initialized", "primitive_init_proven",
-                        "_wt_make_undefined_field", "_wt_use_definitely_initialized_fields"]
+            test_src = read(joinpath(ROOT, "test", "partial_new_defaults.jl"), String)
+            forbidden = ["_partial_new_is_definitely_initialized", "_definitely_initializes_in_ir",
+                         "primitive_init_proven", "struct_type === Random.Xoshiro", "nameof(struct_type)",
+                         "allow_uninitialized", "leaves a non-reference Julia field undefined"]
+            required = ["every missing field takes the default value of its physical", "_wt_ref_f64_read",
+                        "_wt_undef_f64", "_wt_mixed_two_invokes", "_wt_agg_read_first", "_wt_undef_struct_select"]
             all_src = stmts_src * test_src
             count(p -> occursin(p, all_src), forbidden) +
                 count(p -> !occursin(p, all_src), required)
@@ -576,7 +576,7 @@ const LOCKS = [
             count(p -> occursin(p, context_src), forbidden) +
                 count(p -> !occursin(p, context_src), required)
         end),
-    "L63_no_control_or_allocation_defaults" => ("dynamic dispatch and Bool conditions never synthesize values; partial %new uses null only as Julia's explicit undefined-reference sentinel and rejects missing physical values",
+    "L63_no_control_or_allocation_defaults" => ("dynamic dispatch and Bool conditions never synthesize values; partial %new fills a missing slot only with its physical default (null reference, zero numeric) and rejects any slot without one",
         () -> begin
             calls_src = read(joinpath(CODEGEN, "calls.jl"), String)
             values_src = read(joinpath(CODEGEN, "values.jl"), String)
@@ -586,8 +586,8 @@ const LOCKS = [
                          "emit default values for the missing fields"]
             required = ["value-producing dynamic dispatch selected a void target",
                         "Bool condition has a non-boolean reference representation",
-                        "struct construction leaves a non-reference Julia field undefined",
-                        "_wt_make_undefined_field"]
+                        "struct construction leaves a field of an unhandled physical type undefined",
+                        "_wt_read_undefined_field"]
             count(p -> occursin(p, calls_src) || occursin(p, values_src) || occursin(p, stmts_src), forbidden) +
                 count(p -> !(occursin(p, calls_src) || occursin(p, values_src) ||
                              occursin(p, stmts_src) || occursin(p, test_src)), required)
