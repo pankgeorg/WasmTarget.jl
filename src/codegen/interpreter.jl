@@ -1387,6 +1387,13 @@ CC.method_table(interp::WasmInterpreter) = interp.method_table
 CC.codegen_cache(interp::WasmInterpreter) = interp.codegen
 # end parity-region
 
+# Every inferred body keeps its source: Julia drops a body it would not inline, and the
+# host-layout walk (ir_reads_host_layout) counts a body it cannot read as a host read, so a
+# type-level fold through a one-foreigncall body such as `Base._fieldindex_nothrow` was refused.
+# parity(quarantine: whether Julia's inference keeps a non-inlineable body's source, the input
+# WT's constant-evaluation rule reads; dart's constants are evaluated by its front end.)
+CC.may_discard_trees(::WasmInterpreter)::Bool = false
+
 # Julia's native inference models `(∘)(runtime_vector...)` as an unbounded
 # recursive union of nested ComposedFunction types, then specializes downstream
 # IR into representation-specific getfield branches. WT uses one flat callable
