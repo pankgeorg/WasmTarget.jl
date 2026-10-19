@@ -537,8 +537,9 @@ end
 # Base.check_world_bounded and Base.isvisible are not overlaid: a method added to Base's own
 # table at their exact signature invalidated every compiled caller of the printing paths
 # (11,240 instances in a model process, measured 2026-10-19). Their call sites stay
-# `:invoke`s of Base's methods instead (src_inlining_policy below), which the identity-keyed
-# lowering reads; the two `_closed_world_*` bodies are the closed world's own callable copies.
+# `:call`s typed by the interpreter instead (CC.abstract_call_known below), which the
+# identity-keyed lowering reads; the two `_closed_world_*` bodies are the closed world's own
+# callable copies.
 
 # parity(quarantine: Julia's isvisible walks binding partitions at run time; the closed module
 # has one world, answered from compile-time metadata.)
@@ -1590,24 +1591,27 @@ end
 # reason: everything else is the general rule above.
 _wt_forced_concrete_eval(@nospecialize(f))::Bool = f === _wt_type_name_str
 
-# The closed-world metadata operations (Base.isvisible, Base.check_world_bounded) are never
-# inlined into a body WT infers: their call sites are lowered by callee identity to the answer
-# the TypeName constant carries (builtins.jl _lower_isvisible!, _lower_check_world_bounded!),
-# which an inlined binding-partition walk would hide. The plan compiles neither body
-# (plan_closed_world leaves both out).
-function _wt_closed_world_metadata_method(m::Method)::Bool
-    local sig = Base.unwrap_unionall(m.sig)
-    (sig isa DataType && length(sig.parameters) >= 1) || return false
-    local ft = sig.parameters[1]
-    return ft === typeof(Base.isvisible) || ft === typeof(Base.check_world_bounded)
+# The closed-world metadata operations (Base.isvisible, Base.check_world_bounded) are typed
+# here and never resolved to a method in a body WT infers: their call sites stay `:call`s,
+# lowered by callee identity to the answer the TypeName constant carries (builtins.jl
+# _lower_isvisible!, _lower_check_world_bounded!), which an inlined binding-partition walk
+# would hide; the candidate step enrolls Base's body for the plan to leave out, as it does
+# any monomorphic call. Typing them here, in the one inference hook Compiler calls with a
+# concrete interpreter, adds no method whose Compiler callers were compiled with an abstract
+# interpreter edge (an overload of src_inlining_policy invalidated 1,405 instances at load).
+function _wt_closed_world_metadata_rt(@nospecialize(f), nargs::Int)
+    f === Base.isvisible && nargs == 3 && return Bool
+    f === Base.check_world_bounded && nargs == 1 && return Union{Nothing, UnitRange{Int64}}
+    return nothing
 end
 
-function CC.src_inlining_policy(interp::WasmInterpreter, mi::Core.MethodInstance,
-                                @nospecialize(src), @nospecialize(info::CC.CallInfo), stmt_flag::UInt32)
-    local def = mi.def
-    def isa Method && _wt_closed_world_metadata_method(def) && return false
-    return @invoke CC.src_inlining_policy(interp::CC.AbstractInterpreter, mi::Core.MethodInstance,
-                                          src, info, stmt_flag)
+function CC.abstract_call_known(interp::WasmInterpreter, @nospecialize(f),
+                                arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+                                max_methods::Int)
+    local rt = _wt_closed_world_metadata_rt(f, length(arginfo.argtypes) - 1)
+    rt === nothing || return CC.Future(CC.CallMeta(rt, Any, CC.Effects(), CC.NoCallInfo()))
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f, arginfo::CC.ArgInfo,
+                                          si::CC.StmtInfo, sv::CC.AbsIntState, max_methods::Int)
 end
 
 function CC.concrete_eval_eligible(interp::WasmInterpreter,
