@@ -610,7 +610,9 @@ function vararg_tuple_of_struct(registry::TypeRegistry, idx::Integer)::Union{Not
 end
 
 # parity(class_info.dart:510 _createStructForRecordClass): a Julia tuple is dart's record.
-function register_tuple_type!(mod::WasmModule, registry::TypeRegistry, T::Type{<:Tuple})::Union{Nothing, StructInfo}
+function register_tuple_type!(mod::WasmModule, registry::TypeRegistry, @nospecialize(T))::Union{Nothing, StructInfo}
+    # unspecialized: specialized on `Type{<:Tuple}`, every tuple type compiled this body once
+    (T isa Type && T <: Tuple) || throw(MethodError(register_tuple_type!, (mod, registry, T)))
     # Already registered?
     haskey(registry.structs, T) && return registry.structs[T]
 

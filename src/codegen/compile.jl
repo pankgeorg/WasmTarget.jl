@@ -97,7 +97,7 @@ end
 
 """The one Julia-signature → physical Wasm-signature derivation.
 parity(pkg/dart2wasm/lib/translator.dart:1862 Translator.signatureForDirectCall)"""
-function function_wasm_signature(arg_types, return_type, global_args,
+function function_wasm_signature(@nospecialize(arg_types), @nospecialize(return_type), global_args,
                                  mod::WasmModule, type_registry::TypeRegistry)::Tuple{Vector{WasmValType}, Vector{WasmValType}}
     pts = WasmValType[]
     for (j, T) in enumerate(arg_types)
@@ -776,20 +776,20 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
                     for (site, target) in bindings.invoke_roots)
             local _bound_invokes = bindings === nothing ? Dict{Int,UInt32}() :
                 merge(bindings.invoke_imports, _root_invokes)
-            ctx = CompilationContext(fn_nir, arg_types, return_type, mod, type_registry;
-                                    translator=translator, func_registry=func_registry, func_idx=func_idx, func_ref=f,
-                                    global_args=global_args,
-                                    is_compiled_closure=is_closure &&
-                                        !(bindings !== nothing && bindings.elide_closure_context),
-                                    captured_signal_fields=bindings === nothing ?
-                                        Dict{Symbol,Tuple{Bool,UInt32}}() : bindings.captured_globals,
-                                    captured_constant_fields=bindings === nothing ?
-                                        Dict{Symbol,Any}() : bindings.captured_constants,
-                                    dom_bindings=bindings === nothing ?
-                                        Dict{UInt32,Vector{Tuple{UInt32,Vector{Int32}}}}() : bindings.dom_bindings,
-                                    skip_stmts=bindings === nothing ? Set{Int}() : bindings.skip_stmts,
-                                    invoke_imports=_bound_invokes,
-                                    mi=function_data[i][9])
+            # the positional constructor: a keyword call would compile once per function type
+            ctx = _compilation_context(fn_nir, arg_types, return_type, mod, type_registry,
+                                       translator, func_registry, func_idx, f, global_args,
+                                       is_closure && !(bindings !== nothing && bindings.elide_closure_context),
+                                       bindings === nothing ?
+                                           Dict{Symbol,Tuple{Bool,UInt32}}() : bindings.captured_globals,
+                                       bindings === nothing ?
+                                           Dict{Symbol,Any}() : bindings.captured_constants,
+                                       bindings === nothing ?
+                                           Dict{UInt32,Vector{Tuple{UInt32,Vector{Int32}}}}() : bindings.dom_bindings,
+                                       nothing,
+                                       bindings === nothing ? Set{Int}() : bindings.skip_stmts,
+                                       _bound_invokes,
+                                       function_data[i][9])
             ctx.entry_calls = bindings === nothing ? UInt32[] : copy(bindings.entry_calls)
             ctx.invoke_arguments = bindings === nothing ? Dict{Int,Vector{Int}}() :
                 deepcopy(bindings.invoke_arguments)

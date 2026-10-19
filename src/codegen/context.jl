@@ -103,10 +103,10 @@ mutable struct CompilationContext <: AbstractCompilationContext
 end
 
 # parity(pkg/dart2wasm/lib/code_generator.dart:28 CodeGenerator)
-function CompilationContext(body::NirBody, arg_types::Tuple, return_type, mod::WasmModule, type_registry::TypeRegistry;
+function CompilationContext(body::NirBody, @nospecialize(arg_types::Tuple), @nospecialize(return_type), mod::WasmModule, type_registry::TypeRegistry;
                            translator::Translator,
                            func_registry::Union{FunctionRegistry, Nothing}=nothing,
-                           func_idx::UInt32=UInt32(0), func_ref=nothing,
+                           func_idx::UInt32=UInt32(0), @nospecialize(func_ref=nothing),
                            global_args::Set{Int}=Set{Int}(),
                            is_compiled_closure::Bool=false,
                            captured_signal_fields::Dict{Symbol, Tuple{Bool, UInt32}}=Dict{Symbol, Tuple{Bool, UInt32}}(),
@@ -116,6 +116,26 @@ function CompilationContext(body::NirBody, arg_types::Tuple, return_type, mod::W
                            skip_stmts::Set{Int}=Set{Int}(),
                            invoke_imports::Dict{Int, UInt32}=Dict{Int, UInt32}(),
                            mi::Union{Nothing, Core.MethodInstance})::CompilationContext
+    return _compilation_context(body, arg_types, return_type, mod, type_registry, translator, func_registry,
+                                func_idx, func_ref, global_args, is_compiled_closure, captured_signal_fields,
+                                captured_constant_fields, dom_bindings, dispatch_registry, skip_stmts,
+                                invoke_imports, mi)
+end
+
+# The keyword constructor's body, positional and unspecialized on the function's own types: a
+# keyword call's NamedTuple carries `typeof(func_ref)` and the arity of `arg_types`, so the
+# keyword route compiled once per compiled function's type; the plan's compile loop calls
+# this one directly.
+function _compilation_context(body::NirBody, @nospecialize(arg_types::Tuple), @nospecialize(return_type),
+                              mod::WasmModule, type_registry::TypeRegistry, translator::Translator,
+                              func_registry::Union{FunctionRegistry, Nothing}, func_idx::UInt32,
+                              @nospecialize(func_ref), global_args::Set{Int}, is_compiled_closure::Bool,
+                              captured_signal_fields::Dict{Symbol, Tuple{Bool, UInt32}},
+                              captured_constant_fields::Dict{Symbol, Any},
+                              dom_bindings::Dict{UInt32, Vector{Tuple{UInt32, Vector{Int32}}}},
+                              dispatch_registry::Union{Nothing, DispatchTableRegistry},
+                              skip_stmts::Set{Int}, invoke_imports::Dict{Int, UInt32},
+                              mi::Union{Nothing, Core.MethodInstance})::CompilationContext
     # Calculate n_params excluding WasmGlobal arguments (they're phantom)
     n_real_params = count(i -> !(i in global_args), 1:length(arg_types))
     n_stmts = length(body.stmts)
