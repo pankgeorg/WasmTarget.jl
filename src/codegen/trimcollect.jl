@@ -879,11 +879,14 @@ function closed_world_classes(codeinfos::Vector{Any}, entry_mis::Vector{Any},
     # StaticOnly; one a `typeof` makes, LiteralsOnly), a constant tuple's or immutable struct's
     # fields included
     held_type_objects = Set{DataType}()
-    # identity sets: a Set's methods compile once per type object they are handed (see
-    # TypeRegistry); these hold type objects and are read for membership and in sorted walks
-    typeof_operand_types = Base.IdSet{Any}()   # the static type of each `typeof` operand
-    observed_type_nodes = Base.IdSet{Any}()
-    function contains_ffi_type(@nospecialize(T), visited=Base.IdSet{Any}())
+    typeof_operand_types = Set{Any}()   # the static type of each `typeof` operand
+    observed_type_nodes = Set{Any}()
+    # each local function below is called with type objects, each as its own Type{X}, and its
+    # body would call every set with that type (one compiled method per type object, 25-140 ms
+    # each): the object is widened to a value of unknown type at entry, so the set calls are
+    # the one static method of its kind
+    function contains_ffi_type(@nospecialize(T), visited=Set{Any}())
+        T = Base.inferencebarrier(T)
         T in visited && return false
         push!(visited, T)
         T isa DataType || return false
@@ -891,6 +894,7 @@ function closed_world_classes(codeinfos::Vector{Any}, entry_mis::Vector{Any},
         return any(p -> contains_ffi_type(p, visited), T.parameters)
     end
     function observe_type!(@nospecialize(T))
+        T = Base.inferencebarrier(T)
         T in observed_type_nodes && return
         push!(observed_type_nodes, T)
         if T isa Union
@@ -948,7 +952,7 @@ function closed_world_classes(codeinfos::Vector{Any}, entry_mis::Vector{Any},
     # objects, bits values and the skipped kinds are not counted) the walk rejects, a
     # WasmCompileError at the statement whose constant it walked.
     function hold!(@nospecialize(root))
-        local work = Any[root]
+        local work = Any[Base.inferencebarrier(root)]
         local own = 0
         while !isempty(work)
             local v = pop!(work)
@@ -1106,6 +1110,7 @@ function _dynamic_dispatch_candidate_mis(codeinfos::Vector{Any}, seen::Set{Any};
     _fn_dyn_sigs = Set{Tuple}()
     _fn_dyn_site = Dict{Tuple,Tuple}()   # each signature's first statement in the function
     function observe_callable!(@nospecialize(T))
+        T = Base.inferencebarrier(T)   # see closed_world_classes: one method, not one per type object
         if T isa Union
             foreach(observe_callable!, Base.uniontypes(T))
         elseif T isa DataType && T <: Function
@@ -1408,7 +1413,7 @@ struct ClosedWorld
     classes::ClosedWorldClasses                      # the one class set (closed_world_classes)
     invoked_closures::Set{DataType}                  # the closure and functor types an :invoke calls
     no_method::IdDict{DataType,Set{DataType}}        # per callable type, the args tuples it has no method for
-    lowering_callees::IdDict{Type,Core.MethodInstance} # each fma lowering's Base.fma_emulated, by signature
+    lowering_callees::Dict{Type,Core.MethodInstance} # each fma lowering's Base.fma_emulated, by signature
     numeric_joins::IdDict{Core.CodeInfo,Dict{Int,Type}}  # each body's numeric joins (_numeric_joins!)
     capture::_CaptureTyping                          # the captured variables' types, the bodies' capture reads
 end
@@ -1501,7 +1506,7 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
     local classes = ClosedWorldClasses(Set{DataType}(), Set{DataType}())
     local invoked_closures = Set{DataType}()
     local no_method = IdDict{DataType,Set{DataType}}()
-    local lowering_callees = IdDict{Type,Core.MethodInstance}()
+    local lowering_callees = Dict{Type,Core.MethodInstance}()
     local numeric_joins = IdDict{Core.CodeInfo,Dict{Int,Type}}()
     local capture = _CaptureTyping()
     # The collection's cache partition (CollectionCache): fresh per round by default, see
@@ -1753,7 +1758,7 @@ struct ClosedWorldPlan
     classes::ClosedWorldClasses        # the one class set (closed_world_classes)
     bespoke::IdDict{Core.MethodInstance,Function}
     no_method::IdDict{DataType,Vector{DataType}}
-    lowering_callees::IdDict{Type,Core.MethodInstance}
+    lowering_callees::Dict{Type,Core.MethodInstance}
     external_leaves::Vector{Any}   # (callable, argument types, MethodInstance) of each declared import
     joins::IdDict{Core.MethodInstance,Dict{Int,Type}}   # each planned body's joins (numeric, capture reads)
 end
@@ -2235,12 +2240,13 @@ parity(class_info.dart:864 ClassIdNumbering._number): the class set the numberin
 before any id is assigned.
 """
 function _collect_reachable_ir_types(function_data, bespoke::IdDict{Core.MethodInstance,Function},
-                                     classes::ClosedWorldClasses)::Base.IdSet{DataType}
-    out = Base.IdSet{DataType}()
-    seen = Base.IdSet{Any}()
+                                     classes::ClosedWorldClasses)::Set{DataType}
+    out = Set{DataType}()
+    seen = Set{Any}()
     # a throw_methoderror whose args tuple is typed at run time: (p, static type, rt)
     local error_args = Tuple{Int, Type, Vector{Type}}[]
     function reg!(@nospecialize(T))
+        T = Base.inferencebarrier(T)   # see closed_world_classes: one method, not one per type object
         T === nothing && return
         T in seen && return
         push!(seen, T)

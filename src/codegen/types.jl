@@ -524,12 +524,14 @@ Registry for struct and array type mappings within a module.
 parity(translator.dart:96 Translator): the translator's per-compile type state — classInfo
 (:186), the array type caches (:231), and the constant map (constants.dart:154 constantInfo).
 """
-# The type-keyed maps are IdDicts: a Dict method called with a type object compiles once per
-# type object (its key argument is dispatched as Type{X}), an IdDict's methods take the key
-# unspecialized. Type objects are compared by egal, which is structural for types.
+# The type-keyed maps compare keys with isequal (type equality): two type objects that are
+# equal but not egal — a parametric body over different TypeVars — are one key. A Dict method
+# compiles once per type object it is handed as Type{X}; the walks that hand it one (the class
+# numbering, the class set, the reachable types) widen the type to its kind first, so each
+# container call is the one static method.
 mutable struct TypeRegistry
-    structs::IdDict{Type, StructInfo}  # DataType or UnionAll for parametric types
-    arrays::IdDict{Type, UInt32}  # Element type -> array type index
+    structs::Dict{Type, StructInfo}  # DataType or UnionAll for parametric types
+    arrays::Dict{Type, UInt32}  # Element type -> array type index
     string_array_idx::Union{Nothing, UInt32}  # Index of i8 array type for strings
     string_struct_idx::Union{Nothing, UInt32} # parity(class_info.dart:31 FieldIndex.stringArray): the CLASSED string {classId, data} <: $JlBase
     # (B4/U2: the `unions` tagged-union-wrapper registry is DELETED — a Union value is a boxed
@@ -543,8 +545,8 @@ mutable struct TypeRegistry
     # so that t.name === s.name identity comparison works via ref.eq
     typename_constant_globals::Dict{Core.TypeName, UInt32}  # TypeName -> Wasm global index
     # DFS type ID assignment for runtime dispatch
-    type_ids::IdDict{Type, Int32}  # Concrete type -> unique DFS integer ID
-    type_ranges::IdDict{Type, Tuple{Int32, Int32}}  # Abstract/concrete type -> [low, high] DFS range
+    type_ids::Dict{Type, Int32}  # Concrete type -> unique DFS integer ID
+    type_ranges::Dict{Type, Tuple{Int32, Int32}}  # Abstract/concrete type -> [low, high] DFS range
     # dart class_info.dart: Top carries classId; Object extends it with the
     # lazily-assigned mutable identity-hash slot. Primitive value boxes remain
     # direct Top descendants and therefore do not carry identity state.
@@ -574,7 +576,7 @@ mutable struct TypeRegistry
     egal_filled::Bool
     # the as-checkers (as_checker!, dart's AsCheckers._asCheckers, types.dart:758): per (target,
     # static type), the function, or the rejection its body raised
-    as_checkers::IdDict{Tuple{Type,Type}, Union{UInt32, WasmDiagnostic}}
+    as_checkers::Dict{Tuple{Type,Type}, Union{UInt32, WasmDiagnostic}}
     # utf8proc case-record table helper, shared by the case-mapping/predicate calls.
     unicode_case_func_idx::Union{Nothing, UInt32}
     # F3 (dev/HISTORY.md#closures-and-dynamic-dispatch): specialized Core.Box struct types, keyed by contents WASM type.
@@ -608,16 +610,16 @@ mutable struct TypeRegistry
     # closure-body vtable GLOBAL idxs (immutable, one per compiled closure function).
     closure_base_idx::Union{Nothing, UInt32}
     closure_vtable_struct_idxs::Dict{Int, UInt32}      # max_arity -> vtable struct
-    closure_vtable_globals::IdDict{Type, UInt32}       # closure type -> vtable global
+    closure_vtable_globals::Dict{Type, UInt32}         # closure type -> vtable global
     # the vtable of a closure no dynamic call reaches: no entry (get_empty_closure_vtable!)
     empty_closure_vtable_global::Union{Nothing, UInt32}
     # step5 THE CLASS-DAG (dart class_info.dart:420 _createStructForClass): synthetic {classId:i32}
     # wasm structs per ABSTRACT Julia type, each sub its parent's synthetic; concrete
     # structs subtype their nearest abstract parent instead of flat $JlBase.
-    abstract_struct_idxs::IdDict{Type, UInt32}
+    abstract_struct_idxs::Dict{Type, UInt32}
     # MemoryRef{T} -> its single-value struct {classId, identityHash, mem, off0}
     # (register_memoryref_box!, structs.jl)
-    memoryref_box_idxs::IdDict{Type, UInt32}
+    memoryref_box_idxs::Dict{Type, UInt32}
     # TypeVar -> its constant global, one per TypeVar object (get_typevar_constant_global!)
     typevar_constant_globals::IdDict{TypeVar, UInt32}
     # the runtime jl_has_typevar (get_has_typevar_function!)
@@ -637,16 +639,16 @@ end
 # parity(translator.dart:470 Translator): the constructor that starts a compile with every
 # per-compile type and constant map empty.
 TypeRegistry()::TypeRegistry = TypeRegistry(
-    IdDict{Type, StructInfo}(), IdDict{Type, UInt32}(), nothing, nothing,
+    Dict{Type, StructInfo}(), Dict{Type, UInt32}(), nothing, nothing,
     Dict{WasmValType, UInt32}(),
     IdDict{Type, UInt32}(), Dict{Core.TypeName, UInt32}(),
-    IdDict{Type, Int32}(), IdDict{Type, Tuple{Int32, Int32}}(),
+    Dict{Type, Int32}(), Dict{Type, Tuple{Int32, Int32}}(),
     nothing, nothing, nothing, nothing, nothing, nothing, nothing, Int32(0),
     nothing, nothing, nothing, nothing, nothing, nothing, nothing,
     nothing,  # unicode_property_func_idx
     nothing,  # egal_func_idx
     false,    # egal_filled
-    IdDict{Tuple{Type,Type}, Union{UInt32, WasmDiagnostic}}(),  # as_checkers
+    Dict{Tuple{Type,Type}, Union{UInt32, WasmDiagnostic}}(),  # as_checkers
     nothing,  # unicode_case_func_idx
     Dict{WasmValType, UInt32}(),  # box_types (F3)
     IdDict{Any, UInt32}(),        # constant_globals (ensureConstant), keyed by ===
@@ -654,10 +656,10 @@ TypeRegistry()::TypeRegistry = TypeRegistry(
     UInt32[],                    # module_init_functions
     Dict{Union{String,Symbol}, UInt32}(),  # string_constant_globals (census F3)
     Dict{String, Tuple{UInt32, UInt32}}(),  # lazy_string_globals
-    nothing, Dict{Int, UInt32}(), IdDict{Type, UInt32}(),  # closure layouter
+    nothing, Dict{Int, UInt32}(), Dict{Type, UInt32}(),  # closure layouter
     nothing,                                            # empty_closure_vtable_global
-    IdDict{Type, UInt32}(),                             # step5 class-DAG synthetics
-    IdDict{Type, UInt32}(),                             # MemoryRef single-value structs
+    Dict{Type, UInt32}(),                               # step5 class-DAG synthetics
+    Dict{Type, UInt32}(),                               # MemoryRef single-value structs
     IdDict{TypeVar, UInt32}(),                          # TypeVar constants
     nothing,                                            # has_typevar_func_idx
     nothing,                                            # u128_divrem_func_idx
@@ -940,11 +942,10 @@ IDs start at 1 (0 is reserved for unknown/unassigned).
 
 parity(class_info.dart:864 ClassIdNumbering._number): one DFS numbers the closed world.
 """
-function assign_type_ids!(registry::TypeRegistry; extra_concrete_types::Union{Nothing,AbstractSet{DataType}}=nothing)::Union{Nothing,IdDict{Type,Tuple{Int32,Int32}}}
+function assign_type_ids!(registry::TypeRegistry; extra_concrete_types::Union{Nothing,Set{DataType}}=nothing)::Union{Nothing,Dict{Type,Tuple{Int32,Int32}}}
     # formal(dev/formal/ClassIdDispatch.tla): sorted-children DFS gives nested, sibling-disjoint ranges and a numbering that is a function of the closed world; only the lazy ensure_type_id! path makes ids history-dependent
     # Collect all concrete types from the registry that have typeId (field_offset > 0)
-    # (identity sets and maps: see TypeRegistry)
-    concrete_types = Base.IdSet{DataType}()
+    concrete_types = Set{DataType}()
     for (T, info) in registered_structs(registry)
         if T isa DataType && isconcretetype(T) && info.field_offset > 0
             push!(concrete_types, T)
@@ -969,7 +970,7 @@ function assign_type_ids!(registry::TypeRegistry; extra_concrete_types::Union{No
     # Walk supertype chains to collect all relevant abstract types
     # Use base types (without parameters) for abstract types to ensure
     # all subtypes of e.g. AbstractVector are grouped together
-    abstract_types = Base.IdSet{DataType}()
+    abstract_types = Set{DataType}()
     for T in concrete_types
         S = supertype(T)
         while S !== Any
@@ -989,7 +990,7 @@ function assign_type_ids!(registry::TypeRegistry; extra_concrete_types::Union{No
     # Build parent → children map
     # For each type, find its parent in our collected set (skip intermediate types not in the set)
     all_types = union(concrete_types, abstract_types)
-    children = IdDict{DataType, Vector{DataType}}()
+    children = Dict{DataType, Vector{DataType}}()
 
     for T in all_types
         T === Any && continue
@@ -1017,11 +1018,14 @@ function assign_type_ids!(registry::TypeRegistry; extra_concrete_types::Union{No
     # DFS traverse from Any, assigning IDs
     # Abstract types visit children first, then get [low, high] range
     # Concrete types get a single ID (leaf)
-    type_ids = IdDict{Type, Int32}()
-    type_ranges = IdDict{Type, Tuple{Int32, Int32}}()
+    type_ids = Dict{Type, Int32}()
+    type_ranges = Dict{Type, Tuple{Int32, Int32}}()
     counter = Ref(Int32(1))  # Start at 1, reserve 0 for unknown
 
     function dfs!(node::DataType)
+        # a recursive local function is called with each type object's own Type{X}, and its
+        # body would then call every map with that type: the node is its kind from here on
+        node = Base.inferencebarrier(node)::DataType
         low = counter[]
         kids = get(children, node, DataType[])
         # Sort children deterministically by type name for reproducible IDs
@@ -2763,7 +2767,7 @@ parity(quarantine: WT materializes a runtime type object for every numbered type
 """
 function ensure_all_type_globals!(mod::WasmModule, registry::TypeRegistry)::Nothing
     # Collect all types that need globals: those with DFS IDs or DFS ranges
-    all_typed = Base.IdSet{Type}()
+    all_typed = Set{Type}()
     for T in keys(registry.type_ids)
         push!(all_typed, T)
     end
