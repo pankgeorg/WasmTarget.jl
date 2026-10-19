@@ -1021,7 +1021,7 @@ function assign_type_ids!(registry::TypeRegistry; extra_concrete_types::Union{No
         low = counter[]
         kids = get(children, node, DataType[])
         # Sort children deterministically by type name for reproducible IDs
-        sort!(kids, by=T -> string(T))
+        sort!(kids, by=_type_string)
 
         if isempty(kids) && (isconcretetype(node) || is_runtime_vararg_tuple_type(node) ||
                              (node <: Tuple && Base.isdispatchtuple(node)))
@@ -1107,7 +1107,7 @@ function registered_structs(registry::TypeRegistry)::Vector{Pair{Type,StructInfo
         while j < length(pairs) && pairs[j + 1].second.wasm_type_idx == pairs[i].second.wasm_type_idx
             j += 1
         end
-        j > i && (pairs[i:j] = ordered_by(pairs[i:j], p -> string(p.first)))
+        j > i && (pairs[i:j] = ordered_by(pairs[i:j], p -> _type_string(p.first)))
         i = j + 1
     end
     return pairs
@@ -1156,13 +1156,41 @@ function ordered_by(items::AbstractVector, keyfn)::Vector{eltype(items)}
     return items[sortperm(keys)]
 end
 
+# Printing a type (`show_typealias`, `print_to_string`) is the costliest part of every ordered
+# registry walk and of the class numbering; a type object's text does not change, so each is
+# printed once per process. Identity-keyed: two type objects that print alike but are not egal
+# (two `Array{T,1}` bodies over different TypeVars) are two entries with one text.
+const _TYPE_STRING_CACHE = IdDict{Any,String}()
+const _TYPE_ORDER_KEY_CACHE = IdDict{Any,Tuple{String,String}}()
+const _TYPE_STRING_LOCK = ReentrantLock()
+
+"""
+    _type_string(T) -> String
+
+`string(T)`, computed once per type object (see _TYPE_STRING_CACHE).
+"""
+function _type_string(@nospecialize(T))::String
+    local s = Base.@lock _TYPE_STRING_LOCK get(_TYPE_STRING_CACHE, T, nothing)
+    s === nothing || return s
+    s = string(T)::String
+    Base.@lock _TYPE_STRING_LOCK (_TYPE_STRING_CACHE[T] = s)
+    return s
+end
+
 """A type's program-determined order key: its printed name, then its defining module
-(two modules may define a `Foo`), then the wrapper's name for UnionAll bodies.
+(two modules may define a `Foo`), then the wrapper's name for UnionAll bodies. Computed once
+per type object.
 
 parity(quarantine: Julia type objects hash by address, so a registry walk needs a
 program-derived key; dart Maps iterate in insertion order.)"""
-type_order_key(@nospecialize(T))::Tuple{String,String} =
-    (string(T), T isa DataType ? string(T.name.module) : (T isa UnionAll ? string(Base.unwrap_unionall(T).name.module) : ""))
+function type_order_key(@nospecialize(T))::Tuple{String,String}
+    local k = Base.@lock _TYPE_STRING_LOCK get(_TYPE_ORDER_KEY_CACHE, T, nothing)
+    k === nothing || return k
+    k = (_type_string(T), T isa DataType ? string(T.name.module) :
+                          (T isa UnionAll ? string(Base.unwrap_unionall(T).name.module) : ""))
+    Base.@lock _TYPE_STRING_LOCK (_TYPE_ORDER_KEY_CACHE[T] = k)
+    return k
+end
 
 """
     ordered_type_constants(registry) -> Vector{Pair}
@@ -1832,7 +1860,7 @@ ran it on any value the cast admitted: `RW(::Any)` holding a Symbol ran `RW(::St
 (String and Symbol share one wasm struct).
 """
 function get_function(registry::FunctionRegistry, func_ref, arg_types::Tuple;
-                      expected_return::Union{Nothing,Type}=nothing)::Union{FunctionInfo, Nothing}
+                      @nospecialize(expected_return::Union{Nothing,Type}=nothing))::Union{FunctionInfo, Nothing}
     # When the caller knows the expected return type, a registration with an incompatible
     # return is skipped (two overloads can share loosely inferred argument types).
     _ret_ok(info) = expected_return === nothing || expected_return === Any ||
@@ -1873,7 +1901,7 @@ to ordinary/fuzzy cross-call lookup and to abstract sites.
 parity(translator.dart:1954 singleTarget): the devirtualized direct target.
 """
 function get_exact_candidate(registry::FunctionRegistry, func_ref, arg_types::Tuple;
-                             expected_return::Union{Nothing,Type}=nothing)::Union{FunctionInfo,Nothing}
+                             @nospecialize(expected_return::Union{Nothing,Type}=nothing))::Union{FunctionInfo,Nothing}
     all(_closed_world_exact_type, arg_types) || return nothing
     infos = get_func_ref_infos(registry, func_ref)
     infos === nothing && return nothing

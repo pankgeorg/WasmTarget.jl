@@ -205,7 +205,7 @@ parity(translator.dart:1597 convertType)
 """
 function convert_type!(b::InstrBuilder, from::WasmValType, to::WasmValType,
                        ctx::AbstractCompilationContext;
-                       from_julia::Union{Type,Nothing}=nothing)::Union{Nothing,InstrBuilder}
+                       @nospecialize(from_julia::Union{Type,Nothing}=nothing))::Union{Nothing,InstrBuilder}
     local _mod = ctx.mod
     # `nothing` meeting a nullable reference of the any hierarchy (a Union{T,Nothing}'s box or
     # struct, anyref, eqref, structref) is its null, whichever position's form it arrives in (a
@@ -460,7 +460,7 @@ parity(translator.dart:1597 convertType): the ref→ref arm — ref.as_non_null 
 nullability blocks the upcast (:1614-1616), else ref.cast (:1619).
 """
 function _narrow_ref!(b::InstrBuilder, ctx::AbstractCompilationContext, from::WasmValType,
-                      to::WasmValType, from_julia::Union{Type,Nothing})::InstrBuilder
+                      to::WasmValType, @nospecialize(from_julia::Union{Type,Nothing}))::InstrBuilder
     local _mod = ctx.mod
     if wasm_subtype(from, to, _mod.types)
         # Upcast is free — emit nothing.
@@ -526,7 +526,7 @@ the emitted result type.
 """
 function coerce_stack_top!(b::InstrBuilder, expected::WasmValType,
                            ctx::AbstractCompilationContext;
-                           from_julia::Union{Type,Nothing}=nothing)::WasmValType
+                           @nospecialize(from_julia::Union{Type,Nothing}=nothing))::WasmValType
     isempty(b.v.stack) && throw(ArgumentError("cannot coerce an empty emitted-value stack"))
     actual = b.v.stack[end]
     actual === expected || convert_type!(b, actual, expected, ctx; from_julia=from_julia)
@@ -985,7 +985,7 @@ shape stays consistent, matching dart's posture that unreachable code still vali
 parity(code_generator.dart:665 translateExpression)
 """
 function emit_value!(b::InstrBuilder, val::NirNode, ctx::AbstractCompilationContext,
-                     expected::WasmValType; from_julia::Union{Type,Nothing}=nothing)::WasmValType
+                     expected::WasmValType; @nospecialize(from_julia::Union{Type,Nothing}=nothing))::WasmValType
     # A literal `nothing` has an exact null representation at a reference sink.
     # This is deliberately literal-only; SSA/Union shape guesses once swallowed
     # live values here. Dynamic Nothing is handled by its typed producer.

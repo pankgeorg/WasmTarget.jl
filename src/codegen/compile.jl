@@ -242,7 +242,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
                         options::CompilerOptions,
                         diagnostics::Union{Nothing,Vector{WasmDiagnostic}},
                         entry_names::Set{String}=Set{String}(),
-                        named_entries::Set{Any}=Set{Any}()
+                        named_entries::Set{EntryKey}=Set{EntryKey}()
                         )::Union{WasmModule, Tuple{WasmModule, TypeRegistry, FunctionRegistry, DispatchTableRegistry}}
     # This private entry receives only a complete plan produced by
     # `trim_compile_plan`. It never discovers or silently adds functions.
@@ -252,11 +252,12 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     # (import stubs are registered in func_registry at their import indices, not compiled)
     if !isempty(import_stubs)
         import_stub_funcs = Set{Any}(entry[1] for entry in import_stubs)
-        functions = filter(entry -> !(entry isa Tuple && entry[1] in import_stub_funcs), functions)
+        functions = filter(entry -> !(entry[1] in import_stub_funcs), functions)
     end
 
     # the framework's predeclared module (checked at the compile's entry, before collection:
     # check_existing_module), else a new one
+    local lap = wt_lap()
     mod = existing_module !== nothing ? existing_module :
           WasmModule(; source_map_url, builder_trace=options.builder_trace)
     # a module with a host-declared import imports the count of its open calls, which the host's
@@ -304,7 +305,10 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     # the plan's entries carry their names (trim_compile_plan's), so none needs normalizing
     normalized = functions
 
-    requested_names = Set(String(entry[3]) for entry in normalized)
+    requested_names = Set{String}()
+    for entry in normalized
+        push!(requested_names, String(entry[3]))
+    end
     unknown_bindings = setdiff(Set(keys(root_bindings)), requested_names)
     isempty(unknown_bindings) || throw(ArgumentError(
         "root bindings do not match compilation roots: $(sort!(collect(unknown_bindings)))"))
@@ -412,9 +416,11 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
         end
         register_reachable_type!(mod, type_registry, return_type)
 
-        push!(function_data, (f, arg_types, name, typed, return_type, global_args, is_closure,
-                              typed === nothing ? nothing : nir_body(typed), entry_mi))
+        # a row of `Any`s, not a tuple: see _compile_module_trim
+        push!(function_data, Any[f, arg_types, name, typed, return_type, global_args, is_closure,
+                                 typed === nothing ? nothing : nir_body(typed), entry_mi])
     end
+    wt_lap!(lap, "plan: NIR bodies + signature types of $(length(function_data)) functions")
 
     # Add all required globals to the module
     for global_idx in sort(collect(keys(required_globals)))
@@ -464,7 +470,9 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     # changed field-resolution ORDER and produced duplicate layouts (caught by
     # WasmMakie's E-001); numbering needs no wasm struct to exist, and a type
     # registered lazily later receives its pre-assigned id via ensure_type_id!.
+    wt_lap!(lap, "plan: foreigncall imports, lowering classes")
     _reachable = _collect_reachable_ir_types(function_data, plan.bespoke, plan.classes)
+    wt_lap!(lap, "plan: reachable IR types ($(length(_reachable)))")
     # each MethodError a dynamic call throws: its callee's class and its args tuples (the plan's
     # per-callee no-method record)
     for (F, Ts) in plan.no_method
@@ -476,6 +484,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
 
     # Assign DFS type IDs (the closed world = registered + reachable)
     assign_type_ids!(type_registry; extra_concrete_types=_reachable)
+    wt_lap!(lap, "plan: assign_type_ids! ($(length(type_registry.type_ids)) classes)")
 
     # Create BoxedNothing singleton global (after type IDs assigned)
     get_nothing_global!(mod, type_registry)
@@ -483,6 +492,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     # Create DataType globals for ALL types with DFS IDs + type lookup table
     ensure_all_type_globals!(mod, type_registry)
     create_type_lookup_table!(mod, type_registry)
+    wt_lap!(lap, "plan: type globals + lookup table")
 
     # String hashing needs no pre-created helper function: hash(::String,::UInt)/
     # hash(::SubString{String},::UInt) are overlaid with a pure-Julia,
@@ -549,12 +559,15 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     # free `name_<k>`
     # parity(pkg/dart2wasm/lib/functions.dart:171 FunctionCollector.getFunction): `functions.define(ftype, getFunctionName(target))` names the function where it is defined
     local given_names = Set{String}()
-    local plan_names = union(Set{String}(String(fd[3]) for fd in function_data), entry_names)
+    local plan_names = copy(entry_names)
+    for fd in function_data
+        push!(plan_names, String(fd[3]))
+    end
     local export_name_counts = Dict{String,Int}()
     local defined_names = String[]
     for (f, arg_types, name, _, _, _, _) in function_data
         local export_name = name
-        if !((f, Tuple(arg_types)) in named_entries) && (name in given_names || name in entry_names)
+        if !(EntryKey(f, Tuple(arg_types)) in named_entries) && (name in given_names || name in entry_names)
             local k = get(export_name_counts, name, 1)
             while string(name, "_", k) in given_names || string(name, "_", k) in plan_names
                 k += 1
@@ -601,6 +614,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
         define_function!(mod, _pp, _rr; name=defined_names[i])
     end
 
+    wt_lap!(lap, "plan: declare $(length(function_data)) functions (signatures)")
     # THE CLOSURE VTABLE PRE-PASS (the index-freeze rule: nothing
     # may add functions during body compilation). Trampolines + vtable globals for
     # every type-keyed userland closure are created NOW; their bodies' FINAL indices
@@ -697,6 +711,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
 
 
 
+    wt_lap!(lap, "plan: closure vtables, link_roots")
     # Build dispatch tables for megamorphic functions (>8 specializations)
     # Phase 1: metadata (signatures, globals, tables) — needed by emit_dispatch_call! during body compilation
     dispatch_registry = build_dispatch_tables(func_registry, type_registry)
@@ -711,6 +726,8 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     # added once, after codegen, where whether the module has Julia's exception stack is known
     local compile_exports = Tuple{String,UInt32}[]
 
+    wt_lap!(lap, "plan: dispatch tables")
+    local body_lap = wt_lap()
     # Second pass: fill each defined function with its body
     for (i, (f, arg_types, name, _, return_type, global_args, is_closure, fn_nir)) in enumerate(function_data)
         func_idx = UInt32(n_imports + n_existing + i - 1)
@@ -785,7 +802,11 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
         end
         fill_function!(mod, func_idx, b)
         push!(compile_exports, (defined_names[i], func_idx))
+        # per-body laps with WT_TIMING_BODIES=1 (a statement count sizes each body)
+        get(ENV, "WT_TIMING_BODIES", "") == "1" &&
+            wt_lap!(body_lap, "body $(name) ($(fn_nir === nothing ? 0 : length(fn_nir.stmts)) stmts)")
     end
+    wt_lap!(lap, "codegen: $(length(function_data)) bodies")
 
     # Phase 2: Add wrapper functions AFTER all actual functions are compiled.
     # This ensures entry.target_idx values (from func_registry) point to correct indices.
@@ -824,6 +845,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     # the class reader of an escaped exception, over the final numbering, as the egal function's
     # body is filled once codegen has numbered every class
     ensure_class_id_reader!(mod, type_registry, translator)
+    wt_lap!(lap, "codegen: wrappers, egal, type fill, exports")
 
     if return_registries
         return (mod, type_registry, func_registry, dispatch_registry)
@@ -836,14 +858,13 @@ end
 # entry points may normalize inputs, but none may bypass this collector.
 # parity(pkg/dart2wasm/lib/compile.dart:572 _runCodegenPhase)
 function _compile_module_trim(functions::Vector; kwargs...)::Union{WasmModule, Tuple{WasmModule, TypeRegistry, FunctionRegistry, DispatchTableRegistry}}
+    # each entry as a row of `Any`s: a tuple's type carries the callable's, and every read of
+    # it (destructuring, getindex, a Dict key) compiles once per callable
     normalized = Any[]
     for entry in functions
-        if length(entry) == 2
-            f, arg_types = entry
-            push!(normalized, (f, arg_types, string(nameof(f))))
-        else
-            push!(normalized, entry)
-        end
+        local f, arg_types = _entry_field(entry, 1), _entry_field(entry, 2)
+        local name = _entry_nfields(entry) == 2 ? string(nameof(f)) : _entry_field(entry, 3)
+        push!(normalized, Any[f, arg_types, name])
     end
     import_stubs = get(kwargs, :import_stubs, Any[])
     external_entries = Any[(entry[1], Tuple(entry[3])) for entry in import_stubs]
@@ -854,30 +875,30 @@ function _compile_module_trim(functions::Vector; kwargs...)::Union{WasmModule, T
     # every requested name (an entry given with its name) decided before anything is compiled: a
     # name two entries request, or one entry requested under two names, is refused, never renamed
     # onto another entry; an entry given without a name takes its function's, disambiguated
-    local requested = Dict{String,Any}()
-    local entry_name = Dict{Any,String}()
+    local requested = Dict{String,EntryKey}()
+    local entry_name = Dict{EntryKey,String}()
     for entry in functions
-        length(entry) >= 3 || continue
-        local f, arg_types, name = entry[1], entry[2], entry[3]
-        local key = (f, Tuple(arg_types))
+        _entry_nfields(entry) >= 3 || continue
+        local f, arg_types, name = _entry_field(entry, 1), _entry_field(entry, 2), _entry_field(entry, 3)
+        local key = EntryKey(f, Tuple(arg_types))
         local prior = get(requested, name, key)
         isequal(prior, key) || throw(ArgumentError(
-            "two entries request the export name \"$name\": $(prior[1])$(prior[2]) and $(f)$(Tuple(arg_types))"))
+            "two entries request the export name \"$name\": $(prior.f)$(prior.args) and $(f)$(Tuple(arg_types))"))
         local other = get(entry_name, key, name)
         other == name || throw(ArgumentError(
             "the entry $(f)$(Tuple(arg_types)) is requested under two names, \"$other\" and \"$name\""))
         requested[name] = key
         entry_name[key] = name
     end
-    kwargs = (; kwargs..., entry_names=Set{String}(keys(requested)), named_entries=Set{Any}(values(requested)))
+    kwargs = (; kwargs..., entry_names=Set{String}(keys(requested)), named_entries=Set{EntryKey}(values(requested)))
     # a host's module is checked before anything is collected: a mismatch fails at the entry,
     # not after the closed world's collection
     local existing = get(kwargs, :existing_module, nothing)
     existing === nothing || check_existing_module(existing, get(kwargs, :source_map_url, nothing),
                                                   kwargs[:options])
     try
-        plan = trim_compile_plan(normalized; external_entries)
-        return _compile_closed_world_plan(plan; kwargs...)
+        plan = wt_phase(() -> trim_compile_plan(normalized; external_entries), "trim_compile_plan")
+        return wt_phase(() -> _compile_closed_world_plan(plan; kwargs...), "_compile_closed_world_plan")
     catch err
         # a failure outside any statement — collecting the closed world, registering its
         # types, building its dispatch tables, declaring its functions — located at the

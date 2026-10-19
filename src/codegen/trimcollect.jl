@@ -127,6 +127,43 @@ function _match_is_one_signature(m::Core.MethodMatch)::Bool
     return true
 end
 
+"""
+    EntryKey(f, args)
+
+A callable with its argument types, as a Dict or Set key: the pair `(f, args)` compared as the
+tuple would be (the callable by identity, the types by type equality), typed `Any` so no key
+specializes a container method on the callable's type.
+"""
+struct EntryKey
+    f::Any
+    args::Any      # a Tuple of types
+end
+Base.hash(k::EntryKey, h::UInt)::UInt = hash(k.args, hash(k.f, h))
+Base.isequal(a::EntryKey, b::EntryKey)::Bool =
+    (a.f === b.f || (a.f isa Type && b.f isa Type && a.f == b.f)) && isequal(a.args, b.args)
+Base.:(==)(a::EntryKey, b::EntryKey)::Bool = isequal(a, b)
+
+"""
+    MiKey(mi)
+
+A MethodInstance's method and signature as a key: two MethodInstance objects of one method at
+one signature are one key (Compiler may hand out a fresh object for the same overlay
+specialization). Typed `Any` so no key specializes a container method on the signature.
+"""
+struct MiKey
+    def::Any
+    spec::Any
+end
+MiKey(mi::Core.MethodInstance)::MiKey = MiKey(mi.def, mi.specTypes)
+Base.hash(k::MiKey, h::UInt)::UInt = hash(k.spec, hash(k.def, h))
+Base.isequal(a::MiKey, b::MiKey)::Bool = a.def === b.def && a.spec == b.spec
+Base.:(==)(a::MiKey, b::MiKey)::Bool = isequal(a, b)
+
+# the fields of a compile entry `(f, arg_types[, name])`, read without specializing on the
+# tuple's type (getfield is a builtin; destructuring or getindex compiles per tuple type)
+_entry_field(@nospecialize(e), i::Int) = e isa Tuple ? getfield(e, i) : e[i]
+_entry_nfields(@nospecialize(e))::Int = e isa Tuple ? nfields(e) : length(e)
+
 # the most candidate tuples one dynamic call enumerates or the ambiguity search asks about
 # parity(quarantine: Julia selects among a callable's methods by specificity and raises for an ambiguity; a dart closure has one body.)
 const _CANDIDATE_BOUND = 4096
@@ -545,9 +582,11 @@ function _missing_explicit_invoke_mis(codeinfos::Vector{Any}, seen::Set{Any};
                             msig = Base.unwrap_unionall(match.method.sig)
                             if msig isa DataType && msig <: Tuple &&
                                length(msig.parameters) == length(arg_types) + 1
-                                canonical_args = Any[
-                                    _canonical_type_object_arg(arg_types[j], msig.parameters[j + 1])
-                                    for j in eachindex(arg_types)]
+                                canonical_args = Any[]
+                                for j in eachindex(arg_types)
+                                    push!(canonical_args,
+                                          _canonical_type_object_arg(arg_types[j], msig.parameters[j + 1]))
+                                end
                                 canonical_ftype = Tuple{Core.Typeof(f), canonical_args...}
                                 if canonical_ftype != ftype
                                     canonical_matches = wt_method_matches(canonical_ftype)
@@ -1463,12 +1502,15 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
     local lowering_callees = Dict{Type,Core.MethodInstance}()
     local numeric_joins = IdDict{Core.CodeInfo,Dict{Int,Type}}()
     local capture = _CaptureTyping()
-    # Fresh cache partition per collection: see cache_token in WasmInterpreter.
-    interp = WasmInterpreter(Base.RefValue(0))
+    # The collection's cache partition (CollectionCache): fresh per round by default, see
+    # cache_token in WasmInterpreter and WT_INFER_CACHE.
+    local cache = CollectionCache()
+    interp = collection_interp(cache)
     invokelatest_queue = CC.CompilationQueue(; interp)
     codeinfos = Any[]
     workqueue = CC.CompilationQueue(; interp)
     append!(workqueue, entries)
+    local lap = wt_lap()
     try
         CC.compile!(codeinfos, workqueue; invokelatest_queue, _COMPILE_KW...)
         CC.compile!(codeinfos, invokelatest_queue; invokelatest_queue, _COMPILE_KW...)
@@ -1484,14 +1526,15 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
     # belong to the Wasm component. Cut them before invoke completion and
     # dynamic-dispatch discovery so external implementation details can never
     # contaminate the closed world.
+    wt_lap!(lap, "collect: compile! of $(length(entries)) entries -> $(length(codeinfos) ÷ 2) bodies")
     codeinfos = _prune_external_leaf_subgraphs(codeinfos, entries, external_leaves; numeric_joins, capture)
     # Julia's queue may leave an explicit invoke with an abstract callable slot
     # as an IR edge without materializing its body (e.g. Base.with_output_color's
     # `Function` argument). A closed world cannot defer that edge to codegen.
     # Enroll every edge's target (_closed_world_edge) to a fixpoint before selector discovery.
     base_mis = Set{Any}()
-    mi_key(mi) = (mi.def, mi.specTypes)
-    base_mi_keys = Set{Any}()
+    mi_key(mi) = MiKey(mi)
+    base_mi_keys = Set{MiKey}()
     for (_, mi, _) in _collected_pairs(codeinfos)
         push!(base_mis, mi)
         push!(base_mi_keys, mi_key(mi))
@@ -1516,7 +1559,7 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
     function collect_new_pairs!(mis)
         isempty(mis) && return false
         local batch = Tuple{Any,String}[]   # (resolved root, why it was enrolled)
-        fresh_interp = WasmInterpreter(Base.RefValue(0))
+        fresh_interp = collection_interp(cache)
         fresh_ci = Any[]
         fresh_wq = CC.CompilationQueue(; interp=fresh_interp)
         fresh_ilq = CC.CompilationQueue(; interp=fresh_interp)
@@ -1561,6 +1604,7 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
             push!(batch, (resolved_mi, why))
             haskey(enrolled_by, resolved_mi) || (enrolled_by[resolved_mi] = batch[end][2])
         end
+        local round_lap = wt_lap()
         try
             CC.compile!(fresh_ci, fresh_wq; invokelatest_queue=fresh_ilq, _COMPILE_KW...)
             CC.compile!(fresh_ci, fresh_ilq; invokelatest_queue=fresh_ilq, _COMPILE_KW...)
@@ -1574,24 +1618,34 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
         # Julia's queue then infers the import's native fallback body with it. That body is
         # not the Wasm component's, and merged it would compile in the import's place.
         fresh_ci = _prune_external_leaf_subgraphs(fresh_ci, Any[first.(batch)...], external_leaves; numeric_joins, capture)
+        local merged = 0
         for (fci, mi, fsrc) in _collected_pairs(fresh_ci)
             mi_key(mi) in base_mi_keys && continue
             push!(base_mis, mi)
             push!(base_mi_keys, mi_key(mi))
             push!(codeinfos, fci, fsrc)
             added = true
+            merged += 1
         end
+        wt_lap!(round_lap, "collect: compile! of $(length(mis)) roots -> $(length(fresh_ci) ÷ 2) bodies, $merged new")
         return added
     end
 
     fma_scanned = Base.IdSet{Any}()
+    local rounds = 0
     # the loop only adds: no collected body is ever dropped (dart's worklist only adds too)
     while true
+        rounds += 1
+        lap = wt_lap()
         # the round's capture typing, over the world collected so far, before any typer reads it
         _capture_typing!(capture, codeinfos)
-        changed = collect_new_pairs!(_missing_explicit_invoke_mis(
+        wt_lap!(lap, "collect round $rounds: capture typing over $(length(codeinfos) ÷ 2) bodies")
+        local invoke_roots = _missing_explicit_invoke_mis(
             codeinfos, invoke_seen; numeric_joins, capture, reasons=enrolled_by, invoked_closures,
-            invoke_originals))
+            invoke_originals)
+        wt_lap!(lap, "collect round $rounds: invoke edges ($(length(invoke_roots)) missing)")
+        changed = collect_new_pairs!(invoke_roots)
+        lap = wt_lap()
 
         # one NIR per collected CodeInfo for this round's two walks (the class set, then the
         # candidates); round-local: `_missing_explicit_invoke_mis` re-targets invoke edges in place
@@ -1599,8 +1653,10 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
         local nir_cache = IdDict{Core.CodeInfo,Vector{NirStmt}}()
         local nir_for = src -> get!(() -> build_nir(src), nir_cache, src)
         classes = closed_world_classes(codeinfos, entries, nir_for)
+        wt_lap!(lap, "collect round $rounds: classes")
         extra = _dynamic_dispatch_candidate_mis(codeinfos, seen_disp; reasons=enrolled_by, classes, nir_for,
                                                 no_method, numeric_joins, capture)
+        wt_lap!(lap, "collect round $rounds: dynamic candidates ($(length(extra)))")
         # Every candidate is a dispatch root, and its callable type a callable type, whether or
         # not its body is collected already: on 1.13 Julia's queue collects a closure body by
         # its `:new` before the dynamic step names it, and the plan's rows must not depend on
@@ -1624,6 +1680,7 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
         changed |= collect_new_pairs!(fma_mis)
         changed || break
     end
+    wt_note("collect: $rounds rounds, $(length(codeinfos) ÷ 2) bodies")
 
     # WASMTARGET dynamic dispatch: discover every target admitted by the closed component.
     # It is compilation correctness and has no environment opt-out or arbitrary round/method ceiling.
@@ -1771,7 +1828,8 @@ function trim_compile_plan(entries_named::Vector; external_entries::Vector=Any[]
     entry_mis = Any[]
     entry_keys = Dict{Any, String}()   # mi → requested name
     entry_values = Dict{Any,Any}()     # explicit capturing-closure instances
-    for (f, arg_types, name) in entries_named
+    for e in entries_named
+        local f, arg_types, name = _entry_field(e, 1), _entry_field(e, 2), _entry_field(e, 3)
         mi = entry_method_instance(f, arg_types)
         push!(entry_mis, mi)
         entry_keys[mi] = name
@@ -1785,8 +1843,8 @@ function trim_compile_plan(entries_named::Vector; external_entries::Vector=Any[]
         push!(external_mis, xmi)
         push!(external_leaves, (f, Tuple(arg_types), xmi))
     end
-    local world = collect_closed_world(entry_mis; external_leaves=external_mis)
-    return plan_closed_world(world, entry_keys, entry_values, external_leaves)
+    local world = wt_phase(() -> collect_closed_world(entry_mis; external_leaves=external_mis), "collect_closed_world")
+    return wt_phase(() -> plan_closed_world(world, entry_keys, entry_values, external_leaves), "plan_closed_world")
 end
 
 """
@@ -1804,10 +1862,10 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
 
     functions = Any[]
     ir_cache = IdDict{Core.MethodInstance, Tuple{Core.CodeInfo, Type}}()
-    collected_method_specs = Set{Any}()
+    collected_method_specs = Set{MiKey}()
     local pairs = _collected_pairs(codeinfos)
     for (_, cmi, _) in pairs
-        push!(collected_method_specs, (cmi.def, cmi.specTypes))
+        push!(collected_method_specs, MiKey(cmi))
     end
     # A capturing closure a collected body invokes statically (Base's reallocating
     # `_growend!`/`_growbeg!` closures) is a direct call of a known method: its body is
@@ -1835,8 +1893,8 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
     # One function per MethodInstance (dart keys a function by its member's Reference). Two
     # methods can share one specialization's argument types — Base calls a less specific
     # method with `invoke(f, Tuple{Super}, x)` — so (f, arg_types) does not name a function.
-    seen_mis = Set{Tuple{Any, Any}}()          # (mi.def, mi.specTypes)
-    mis_by_sig = Dict{Tuple{Any, Any}, Vector{Any}}()
+    seen_mis = Set{MiKey}()                    # (mi.def, mi.specTypes)
+    mis_by_sig = Dict{EntryKey, Vector{Any}}()
     # each planned body's joins, read by codegen (numeric_local_joins): its numeric joins and its
     # capture reads, each computed once in collection (ClosedWorld's numeric_joins, capture)
     local joins = IdDict{Core.MethodInstance,Dict{Int,Type}}()
@@ -1893,12 +1951,14 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
             local msig = Base.unwrap_unionall(mi.def.sig)
             if msig isa DataType && msig <: Tuple &&
                length(msig.parameters) == length(arg_types) + 1
-                local canonical_args = Tuple(
-                    _canonical_type_object_arg(arg_types[j], msig.parameters[j + 1])
-                    for j in eachindex(arg_types))
+                local canonical_list = Any[]
+                for j in eachindex(arg_types)
+                    push!(canonical_list, _canonical_type_object_arg(arg_types[j], msig.parameters[j + 1]))
+                end
+                local canonical_args = Tuple(canonical_list)
                 local canonical_sig = Tuple{sig.parameters[1], canonical_args...}
                 if canonical_args != arg_types &&
-                   (mi.def, canonical_sig) in collected_method_specs
+                   MiKey(mi.def, canonical_sig) in collected_method_specs
                     continue
                 end
             end
@@ -1931,9 +1991,9 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
          arg_types == (Symbol, Module, Module)) && continue
         # a discovery candidate can repeat an explicitly listed specialization (the first
         # occurrence wins: entries are processed first)
-        ((mi.def, mi.specTypes) in seen_mis) && continue
-        push!(seen_mis, (mi.def, mi.specTypes))
-        push!(get!(() -> Any[], mis_by_sig, (f, arg_types)), mi)
+        (MiKey(mi) in seen_mis) && continue
+        push!(seen_mis, MiKey(mi))
+        push!(get!(Vector{Any}, mis_by_sig, EntryKey(f, arg_types)), mi)
         # name: requested for entries, deduped method name otherwise
         name = get(entry_keys, mi, nothing)
         if name === nothing
@@ -1946,7 +2006,9 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
             end
         end
         push!(used_names, name)
-        push!(functions, (f, arg_types, name, mi))
+        # a row of `Any`s, not a tuple: a tuple's type carries the callable's, and every read of
+        # it would compile once per callable
+        push!(functions, Any[f, arg_types, name, mi])
         (f isa DataType && is_closure_type(f)) && push!(planned_callables, f)
         (f isa Function && typeof(f) in world.callable_types) && push!(planned_callables, typeof(f))
         ir_cache[mi] = (src, ci.rettype)

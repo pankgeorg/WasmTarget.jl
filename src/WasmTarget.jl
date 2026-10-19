@@ -194,12 +194,16 @@ function _compile(functions::Vector; optimize::Union{Bool,Symbol}=false, validat
     # the options, read once, and the caller's ledger, which mirrors every recorded
     # WasmDiagnostic (fatal and the non-fatal downgraded dependency stubs; on WasmCompileError
     # the same ledger rides the exception), are the compile's own: its Translator holds them
-    local result = compile_module(functions; existing_module, import_stubs, root_bindings, link_roots,
-                                  return_registries=true, register_ir_types, source_map_url, trace,
-                                  options=options_from_env(), diagnostics=diagnostics_sink)
+    local result = wt_phase("compile_module") do
+        compile_module(functions; existing_module, import_stubs, root_bindings, link_roots,
+                       return_registries=true, register_ir_types, source_map_url, trace,
+                       options=options_from_env(), diagnostics=diagnostics_sink)
+    end
     trace === nothing || trace.entry > 0 ||
         throw(ArgumentError("$(trace.entry_name)$(functions[1][2]) compiled to no traceable body"))
-    local bytes, source_map = _emit_module(result[1]; optimize, validate, class_names=_class_names(result[2]))
+    local bytes, source_map = wt_phase("_emit_module") do
+        _emit_module(result[1]; optimize, validate, class_names=_class_names(result[2]))
+    end
     return CompileResult(bytes, source_map, return_registries ? (result[2], result[3], result[4]) : nothing, trace)
 end
 
@@ -219,7 +223,7 @@ function _class_names(registry::TypeRegistry)::Vector{Union{Nothing,String}}
             push!(names, nothing)
         end
         names[id + 1] === nothing || error("classId $id numbers both $(names[id + 1]) and $T")
-        names[id + 1] = string(T)
+        names[id + 1] = _type_string(T)
     end
     return names
 end
@@ -240,11 +244,12 @@ function _emit_module(mod::WasmModule; optimize, validate::Bool,
     local source_map_url = mod.source_map_url
     # parity(pkg/dart2wasm/lib/compile.dart:635 addMinifiedClassNames): after serialization (:633),
     # before the map is encoded (:639)
-    local bytes, json = source_map_url === nothing ? (to_bytes(mod), nothing) :
-                                                     to_bytes_with_source_map(mod; class_names)
+    local bytes, json = wt_phase("to_bytes") do
+        source_map_url === nothing ? (to_bytes(mod), nothing) : to_bytes_with_source_map(mod; class_names)
+    end
     if optimize === false
         # Soundness gate: validate the emitted module (raises WasmValidationError on reject)
-        validate && validate_wasm_bytes(bytes; label="compiled module")
+        validate && wt_phase(() -> validate_wasm_bytes(bytes; label="compiled module"), "validate_wasm_bytes")
         return bytes, json
     end
     level = optimize === true ? :size : optimize
