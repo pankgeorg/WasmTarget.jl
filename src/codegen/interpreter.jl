@@ -1358,23 +1358,93 @@ struct WasmInterpreter <: CC.AbstractInterpreter
     layout_reads::IdDict{Any, Bool}
 end
 
-function WasmInterpreter(; world::UInt=Base.get_world_counter())::WasmInterpreter
-    mt = CC.OverlayMethodTable(world, WASM_METHOD_TABLE)
-    inf_params = CC.InferenceParams(;
-        aggressive_constant_propagation=true,
-    )
-    opt_params = CC.OptimizationParams(;
-        inline_cost_threshold=500,
-        inline_nonleaf_penalty=100,
-    )
-    WasmInterpreter(world, mt, CC.InferenceResult[], inf_params, opt_params,
-                    IdDict{Core.CodeInstance, Core.CodeInfo}(), :wasm_target, IdDict{Any, Bool}())
+# The inference and optimization parameters WT infers with. `WT_INFER_PARAMS` overrides them
+# for a measurement (`constprop=0`, `inline_cost=N`, `nonleaf_penalty=N`, comma-separated);
+# unset, they are the ones below. Read once per process.
+const _WT_INFER_PARAMS = Ref{Union{Nothing,Tuple{CC.InferenceParams,CC.OptimizationParams}}}(nothing)
+
+function _wt_infer_params()::Tuple{CC.InferenceParams,CC.OptimizationParams}
+    local cached = _WT_INFER_PARAMS[]
+    cached === nothing || return cached
+    local constprop, inline_cost, nonleaf = true, 500, 100
+    for item in split(get(ENV, "WT_INFER_PARAMS", ""), ',')
+        isempty(item) && continue
+        local k, v = split(item, '=')
+        k == "constprop" && (constprop = v != "0")
+        k == "inline_cost" && (inline_cost = parse(Int, v))
+        k == "nonleaf_penalty" && (nonleaf = parse(Int, v))
+    end
+    local params = (CC.InferenceParams(; aggressive_constant_propagation=constprop),
+                    CC.OptimizationParams(; inline_cost_threshold=inline_cost,
+                                          inline_nonleaf_penalty=nonleaf))
+    _WT_INFER_PARAMS[] = params
+    return params
 end
 
-function WasmInterpreter(cache_token; world::UInt=Base.get_world_counter())::WasmInterpreter
-    base = WasmInterpreter(; world)
+function WasmInterpreter(; world::UInt=Base.get_world_counter(),
+                         codegen::IdDict{Core.CodeInstance, Core.CodeInfo}=IdDict{Core.CodeInstance, Core.CodeInfo}(),
+                         inf_cache::Vector{CC.InferenceResult}=CC.InferenceResult[])::WasmInterpreter
+    mt = CC.OverlayMethodTable(world, WASM_METHOD_TABLE)
+    inf_params, opt_params = _wt_infer_params()
+    WasmInterpreter(world, mt, inf_cache, inf_params, opt_params,
+                    codegen, :wasm_target, IdDict{Any, Bool}())
+end
+
+function WasmInterpreter(cache_token; world::UInt=Base.get_world_counter(),
+                         codegen::IdDict{Core.CodeInstance, Core.CodeInfo}=IdDict{Core.CodeInstance, Core.CodeInfo}(),
+                         inf_cache::Vector{CC.InferenceResult}=CC.InferenceResult[])::WasmInterpreter
+    base = WasmInterpreter(; world, codegen, inf_cache)
     WasmInterpreter(base.world, base.method_table, base.inf_cache,
                     base.inf_params, base.opt_params, base.codegen, cache_token, base.layout_reads)
+end
+
+# WT_INFER_CACHE selects how far one collection's inference results are reused:
+#   fresh       (default) every round of a collection infers in its own cache partition
+#   collection  the rounds of one collection share one partition and one codegen stash
+#   process     every collection in the process shares one partition and one stash, so a callee
+#               inferred for an earlier compile (at a world its CodeInstance is still valid in)
+#               is not inferred again
+# The partition's CodeInstances keep their world bounds, so a redefinition invalidates them as
+# it does Julia's own.
+const _WT_PROCESS_TOKEN = Base.RefValue(0)
+const _WT_PROCESS_CODEGEN = IdDict{Core.CodeInstance, Core.CodeInfo}()
+const _WT_INFER_CACHE_MODE = Ref{Union{Nothing,Symbol}}(nothing)
+
+function wt_infer_cache_mode()::Symbol
+    local m = _WT_INFER_CACHE_MODE[]
+    m === nothing || return m
+    m = Symbol(get(ENV, "WT_INFER_CACHE", "fresh"))
+    m in (:fresh, :collection, :process) || error("WT_INFER_CACHE=$m: expected fresh, collection or process")
+    _WT_INFER_CACHE_MODE[] = m
+    return m
+end
+
+"""
+    CollectionCache
+
+The cache partition one closed-world collection infers in: its token, codegen stash and
+inference-result cache, handed to every interpreter the collection makes (collection_interp).
+A `fresh` collection hands each round its own.
+"""
+struct CollectionCache
+    token::Any
+    codegen::IdDict{Core.CodeInstance, Core.CodeInfo}
+    inf_cache::Vector{CC.InferenceResult}
+end
+
+function CollectionCache()::CollectionCache
+    local mode = wt_infer_cache_mode()
+    # the inference-result cache (const-prop results) is one collection's, as it is one
+    # NativeInterpreter's: only the partition and its stash outlive the collection
+    mode === :process && return CollectionCache(_WT_PROCESS_TOKEN, _WT_PROCESS_CODEGEN, CC.InferenceResult[])
+    return CollectionCache(Base.RefValue(0), IdDict{Core.CodeInstance, Core.CodeInfo}(), CC.InferenceResult[])
+end
+
+# an interpreter for one inference step of a collection: in the collection's partition, or
+# (fresh mode) in a partition of its own
+function collection_interp(cache::CollectionCache)::WasmInterpreter
+    wt_infer_cache_mode() === :fresh && return WasmInterpreter(Base.RefValue(0))
+    return WasmInterpreter(cache.token; codegen=cache.codegen, inf_cache=cache.inf_cache)
 end
 
 # Required AbstractInterpreter API

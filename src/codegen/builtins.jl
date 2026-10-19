@@ -394,7 +394,7 @@ parity(sdk/lib/_internal/wasm/common/typed_data.dart:2442 WasmI8ArrayBase._data)
 """
 function emit_memoryref_mem!(b::InstrBuilder, ctx::AbstractCompilationContext, ref::NirNode,
                              expected::Union{WasmValType,Nothing}=nothing;
-                             from_julia::Union{Type,Nothing}=nothing,
+                             @nospecialize(from_julia::Union{Type,Nothing}=nothing),
                              temp_map::Dict{Int,Int}=Dict{Int,Int}())::InstrBuilder
     kind, src = _memoryref_source(ctx, ref)
     if kind === :zero
