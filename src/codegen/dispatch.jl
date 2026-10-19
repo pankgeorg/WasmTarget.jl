@@ -235,7 +235,11 @@ function build_dispatch_tables(func_registry::FunctionRegistry,
                     end
                     ch
                 end for T in _tys]
-                local _common = intersect(Set.(_chains)...)
+                # one intersection per chain (a splatted intersect compiles once per chain count)
+                local _common = Set{UInt32}(first(_chains))
+                for _ch in Iterators.drop(_chains, 1)
+                    intersect!(_common, _ch)
+                end
                 if isempty(_common)
                     push!(slot_types, AnyRef)
                 else

@@ -1003,6 +1003,18 @@ function nir_text(rec::NirStmt)::String
     return rec.slot > 0 ? string("_", rec.slot, " = ", body) : body
 end
 
+# a literal's printed form: `repr` for a number, symbol, string, char or nothing; a type, a
+# function or any other value — a static array, a struct constant — by its type's text, since
+# `repr` of it compiles a show method per type (measured 0.6 s of a model's first compile)
+# parity(pkg/kernel/lib/target/targets.dart:84 DiagnosticReporter.report): one node's printed form (see nir_text).
+function _nir_literal_text(@nospecialize(v))::String
+    (v isa Number || v isa Symbol || v isa AbstractString || v isa AbstractChar || v === nothing) &&
+        return repr(v)
+    v isa Type && return _type_string(v)
+    v isa Module && return string(v)
+    return string("<", _type_string(typeof(v)), ">")
+end
+
 # parity(pkg/kernel/lib/target/targets.dart:84 DiagnosticReporter.report): one node's printed form (see nir_text).
 function _nir_text(x)::String
     x === nothing && return "#undef"
@@ -1010,7 +1022,7 @@ function _nir_text(x)::String
     (x isa NirArgument) && return string("_", x.n)
     (x isa NirSlot) && return string("_", x.id)
     x isa NirGlobalRef && return string(x.mod, ".", x.name)
-    x isa NirLiteral && return repr(x.value)
+    x isa NirLiteral && return _nir_literal_text(x.value)
     _args(ops) = join((_nir_text(o) for o in ops), ", ")
     _callee(c) = c isa NirNode ? _nir_text(c) : string(c)
     x isa NirCall && return string(_callee(x.callee), "(", _args(x.operands), ")")
