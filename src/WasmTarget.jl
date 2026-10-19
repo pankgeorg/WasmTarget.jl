@@ -630,6 +630,19 @@ _pc_struct(x::Int32)         = (s = _PCStruct(x, 1.5); s.a + Int32(s.b))
 _pc_tuple(x::Int64)          = (t = (x, x + Int64(1), x + Int64(2)); t[1] + t[3])
 # end parity-region
 
+# The environment-read knobs (WT_TIMING, WT_INFER_PARAMS, WT_INFER_CACHE) and the process-wide
+# caches are read or filled by the workload below, and a package image keeps a global's value:
+# every process starts them over, so a knob is the process's environment, never the image's.
+function __init__()
+    _WT_TIMING_ON[] = nothing
+    _WT_INFER_PARAMS[] = nothing
+    _WT_INFER_CACHE_MODE[] = nothing
+    empty!(_WT_PROCESS_CODEGEN)
+    empty!(_TYPE_STRING_CACHE)
+    empty!(_TYPE_ORDER_KEY_CACHE)
+    return nothing
+end
+
 @setup_workload begin
     @compile_workload begin
         for (f, ts) in (
