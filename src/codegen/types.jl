@@ -635,6 +635,11 @@ mutable struct TypeRegistry
     pending::PendingTypes
     # the module objects codegen holds by handle (ModuleHandles)
     handles::ModuleHandles
+    # each type object's printed text and order key, printed once per compile (_type_string,
+    # type_order_key): identity-keyed, so two type objects that print alike but are not egal
+    # are two entries with one text
+    type_strings::IdDict{Type, String}
+    type_order_keys::IdDict{Type, Tuple{String, String}}
 end
 
 # parity(translator.dart:470 Translator): the constructor that starts a compile with every
@@ -667,7 +672,9 @@ TypeRegistry()::TypeRegistry = TypeRegistry(
     nothing,                                            # perf_now_idx
     nothing,                                            # rng_globals
     PendingTypes(),                                     # types being registered
-    ModuleHandles()                                     # the module's handles
+    ModuleHandles(),                                    # the module's handles
+    IdDict{Type, String}(),                             # printed type texts
+    IdDict{Type, Tuple{String, String}}()               # type order keys
 )
 
 """
@@ -1030,7 +1037,7 @@ function assign_type_ids!(registry::TypeRegistry; extra_concrete_types::Union{No
         low = counter[]
         kids = get(children, node, DataType[])
         # Sort children deterministically by type name for reproducible IDs
-        sort!(kids, by=_type_string)
+        sort!(kids, by=T -> _type_string(registry, T))
 
         if isempty(kids) && (isconcretetype(node) || is_runtime_vararg_tuple_type(node) ||
                              (node <: Tuple && Base.isdispatchtuple(node)))
@@ -1116,7 +1123,7 @@ function registered_structs(registry::TypeRegistry)::Vector{Pair{Type,StructInfo
         while j < length(pairs) && pairs[j + 1].second.wasm_type_idx == pairs[i].second.wasm_type_idx
             j += 1
         end
-        j > i && (pairs[i:j] = ordered_by(pairs[i:j], p -> _type_string(p.first)))
+        j > i && (pairs[i:j] = ordered_by(pairs[i:j], p -> _type_string(registry, p.first)))
         i = j + 1
     end
     return pairs
@@ -1165,41 +1172,63 @@ function ordered_by(items::AbstractVector, keyfn)::Vector{eltype(items)}
     return items[sortperm(keys)]
 end
 
-# Printing a type (`show_typealias`, `print_to_string`) is the costliest part of every ordered
-# registry walk and of the class numbering; a type object's text does not change, so each is
-# printed once per process. Identity-keyed: two type objects that print alike but are not egal
-# (two `Array{T,1}` bodies over different TypeVars) are two entries with one text.
-const _TYPE_STRING_CACHE = IdDict{Any,String}()
-const _TYPE_ORDER_KEY_CACHE = IdDict{Any,Tuple{String,String}}()
-const _TYPE_STRING_LOCK = ReentrantLock()
-
-"""
-    _type_string(T) -> String
-
-`string(T)`, computed once per type object (see _TYPE_STRING_CACHE).
-"""
-function _type_string(@nospecialize(T))::String
-    local s = Base.@lock _TYPE_STRING_LOCK get(_TYPE_STRING_CACHE, T, nothing)
-    s === nothing || return s
-    s = string(T)::String
-    Base.@lock _TYPE_STRING_LOCK (_TYPE_STRING_CACHE[T] = s)
-    return s
-end
-
 """A type's program-determined order key: its printed name, then its defining module
-(two modules may define a `Foo`), then the wrapper's name for UnionAll bodies. Computed once
-per type object.
+(two modules may define a `Foo`), then the wrapper's name for UnionAll bodies.
 
 parity(quarantine: Julia type objects hash by address, so a registry walk needs a
 program-derived key; dart Maps iterate in insertion order.)"""
-function type_order_key(@nospecialize(T))::Tuple{String,String}
-    local k = Base.@lock _TYPE_STRING_LOCK get(_TYPE_ORDER_KEY_CACHE, T, nothing)
+type_order_key(@nospecialize(T))::Tuple{String,String} =
+    (string(T), T isa DataType ? string(T.name.module) : (T isa UnionAll ? string(Base.unwrap_unionall(T).name.module) : ""))
+
+"""
+    _type_string(registry, T) -> String
+
+`string(T)`, printed once per type object in one compile (`registry.type_strings`): printing a
+type (`show_typealias`, `print_to_string`) is the costliest part of every ordered registry walk
+and of the class numbering.
+
+parity(translator.dart:96 Translator): per-compile state, held by the compile's registry.
+"""
+function _type_string(registry::TypeRegistry, @nospecialize(T))::String
+    T isa Type || return string(T)::String
+    local s = get(registry.type_strings, T, nothing)
+    s === nothing || return s
+    s = string(T)::String
+    registry.type_strings[T] = s
+    return s
+end
+
+"""
+    type_order_key(registry, T) -> Tuple{String,String}
+
+`type_order_key(T)`, computed once per type object in one compile (`registry.type_order_keys`).
+
+parity(translator.dart:96 Translator): per-compile state, held by the compile's registry.
+"""
+function type_order_key(registry::TypeRegistry, @nospecialize(T))::Tuple{String,String}
+    T isa Type || return type_order_key(T)
+    local k = get(registry.type_order_keys, T, nothing)
     k === nothing || return k
-    k = (_type_string(T), T isa DataType ? string(T.name.module) :
-                          (T isa UnionAll ? string(Base.unwrap_unionall(T).name.module) : ""))
-    Base.@lock _TYPE_STRING_LOCK (_TYPE_ORDER_KEY_CACHE[T] = k)
+    k = (_type_string(registry, T), T isa DataType ? string(T.name.module) :
+                                    (T isa UnionAll ? string(Base.unwrap_unionall(T).name.module) : ""))
+    registry.type_order_keys[T] = k
     return k
 end
+
+"""
+    TypeOrderKey(registry)
+
+`type_order_key` over one compile's registry, as the one key function a registry walk is
+handed (`ordered_pairs(registry.type_ids, TypeOrderKey(registry))`): a callable struct, so the
+walks share one specialization instead of one per closure.
+
+parity(quarantine: the program-derived order key for identity-hashed keys, see ordered_pairs.)
+"""
+struct TypeOrderKey
+    registry::TypeRegistry
+end
+# parity(quarantine: the program-derived order key for identity-hashed keys, see ordered_pairs.)
+(k::TypeOrderKey)(@nospecialize(T))::Tuple{String,String} = type_order_key(k.registry, T)
 
 """
     ordered_type_constants(registry) -> Vector{Pair}
@@ -1211,7 +1240,7 @@ own iteration order is the objects' addresses, which differ from process to proc
 parity(quarantine: the program-derived order of the type constants, see type_order_key.)
 """
 ordered_type_constants(registry::TypeRegistry)::Vector{<:Pair} =
-    ordered_by(collect(registry.type_constant_globals), p -> (type_order_key(p.first), p.second))
+    ordered_by(collect(registry.type_constant_globals), p -> (type_order_key(registry, p.first), p.second))
 
 # parity(quarantine: the program-derived order key for a Core.TypeName, see type_order_key.)
 typename_order_key(tn::Core.TypeName)::Tuple{String,String} = (string(tn.module), string(tn.name))
@@ -1248,7 +1277,7 @@ range window (class_info.dart:831 getConcreteClassIdRange).
 parity(class_info.dart:831 ClassIdNumbering.getConcreteClassIdRange): the concrete ids below T.
 """
 function concrete_class_ids(registry::TypeRegistry, @nospecialize(T))::Vector{Int32}
-    ids = Int32[id for (_, id) in ordered_pairs(registry.type_ids, type_order_key, C -> C isa Type && C <: T)]
+    ids = Int32[id for (_, id) in ordered_pairs(registry.type_ids, TypeOrderKey(registry), C -> C isa Type && C <: T)]
     return sort!(ids)
 end
 
@@ -1272,13 +1301,13 @@ parity(quarantine: a JSON dump of the registries for WT's tooling (a host framew
 function serialize_type_ids(registry::TypeRegistry)::Dict{String, Any}
     result = Dict{String, Any}()
     ids = Dict{String, Int32}()
-    for (T, id) in ordered_pairs(registry.type_ids, type_order_key)
+    for (T, id) in ordered_pairs(registry.type_ids, TypeOrderKey(registry))
         ids[string(T)] = id
     end
     result["type_ids"] = ids
 
     ranges = Dict{String, Any}()
-    for (T, (low, high)) in ordered_pairs(registry.type_ranges, type_order_key)
+    for (T, (low, high)) in ordered_pairs(registry.type_ranges, TypeOrderKey(registry))
         ranges[string(T)] = Dict("low" => low, "high" => high)
     end
     result["type_ranges"] = ranges
@@ -1310,7 +1339,7 @@ function serialize_type_registry(registry::TypeRegistry)::Dict{String, Any}
 
     # Array types
     arrays = Dict{String, Int}()
-    for (T, idx) in ordered_pairs(registry.arrays, type_order_key)
+    for (T, idx) in ordered_pairs(registry.arrays, TypeOrderKey(registry))
         arrays[string(T)] = Int(idx)
     end
     result["arrays"] = arrays
@@ -2563,7 +2592,7 @@ function _populate_jl_hierarchy!(mod::WasmModule, registry::TypeRegistry)::Union
             global_get!(b, dt_global_idx)
             _gvt === AnyRef && ref_cast!(b, Int64(dt_type_idx), true)   # anyref-stored type globals narrow at use
         end
-        i32_const!(b, Int64(Int32(hash(type_order_key(type_val)) & 0x7FFFFFFF)))
+        i32_const!(b, Int64(Int32(hash(type_order_key(registry, type_val)) & 0x7FFFFFFF)))
         struct_set!(b, dt_type_idx, UInt32(4))  # field 4 = hash
 
         # Field 5: abstract → i32 (1 if abstract, 0 if concrete)
@@ -2778,7 +2807,7 @@ function ensure_all_type_globals!(mod::WasmModule, registry::TypeRegistry)::Noth
 
     # Create DataType globals for each (get_type_constant_global! is idempotent),
     # in program order — this is where the type-name strings get interned.
-    for T in sort!(collect(all_typed); by = type_order_key)
+    for T in sort!(collect(all_typed); by = TypeOrderKey(registry))
         T isa DataType || continue
         get_type_constant_global!(mod, registry, T)
     end
@@ -2854,7 +2883,7 @@ function populate_type_lookup_table!(b::InstrBuilder, registry::TypeRegistry)::I
     table_size = registry.type_lookup_table_size
 
     # For each concrete type with a DFS ID and a DataType global, populate the table
-    for (T, type_id) in ordered_pairs(registry.type_ids, type_order_key)
+    for (T, type_id) in ordered_pairs(registry.type_ids, TypeOrderKey(registry))
         T isa DataType || continue
         haskey(registry.type_constant_globals, T) || continue
         type_id >= table_size && continue  # Skip late-arriving types that exceed table bounds

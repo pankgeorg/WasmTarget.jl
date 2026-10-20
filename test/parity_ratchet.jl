@@ -3935,7 +3935,7 @@ _printed_lines(mod::WasmTarget.WasmModule)::Vector{String} =
             inv = read(joinpath(CODEGEN, "invoke.jl"), String)
             types = read(joinpath(CODEGEN, "types.jl"), String)
             required = ["((mi.def, mi.specTypes) in seen_mis) && continue",
-                        "push!(functions, (f, arg_types, name, mi))",
+                        "push!(functions, Any[f, arg_types, name, mi])",   # the row's 4th element is the MethodInstance
                         "if m.method.sig == mi.def.sig",
                         "if m.method.sig == root_mi.def.sig",
                         "CC.specialize_method(root_mi.def, root_mi.specTypes, root_mi.sparam_vals)",

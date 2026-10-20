@@ -1469,7 +1469,7 @@ const _COMPILE_KW = :external_linkage in Base.kwarg_decl(first(methods(CC.compil
 # no live edge names stays collected as dead code (NoGarbage, MARCH 13.17 H9). Every dynamic
 # candidate is a dispatch root, collected first or not (RootsComplete).
 """
-    collect_closed_world(entries::Vector{Any}; verify::Bool=false) -> ClosedWorld
+    collect_closed_world(entries::Vector{Any}; verify::Bool=false, options) -> ClosedWorld
 
 Collect the closed transitive callgraph for the given entry
 `MethodInstance`s under the WASM overlay interpreter. With `verify=true`,
@@ -1488,7 +1488,8 @@ parity(quarantine: Julia's trim collection (juliac --trim) is the closed world; 
 its front end's whole-program type flow analysis.)
 """
 function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
-                              external_leaves::Set{Any}=Set{Any}())::ClosedWorld
+                              external_leaves::Set{Any}=Set{Any}(),
+                              options::CompilerOptions=options_from_env())::ClosedWorld
     local callable_types = Set{DataType}()
     local dynamic_roots = Set{Core.MethodInstance}()
     local classes = ClosedWorldClasses(Set{DataType}(), Set{DataType}())
@@ -1498,14 +1499,14 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
     local numeric_joins = IdDict{Core.CodeInfo,Dict{Int,Type}}()
     local capture = _CaptureTyping()
     # The collection's cache partition (CollectionCache): fresh per round by default, see
-    # cache_token in WasmInterpreter and WT_INFER_CACHE.
-    local cache = CollectionCache()
+    # cache_token in WasmInterpreter and CompilerOptions.infer_cache.
+    local cache = CollectionCache(options.infer_cache)
     interp = collection_interp(cache)
     invokelatest_queue = CC.CompilationQueue(; interp)
     codeinfos = Any[]
     workqueue = CC.CompilationQueue(; interp)
     append!(workqueue, entries)
-    local lap = wt_lap()
+    local lap = wt_lap(options.timing)
     try
         CC.compile!(codeinfos, workqueue; invokelatest_queue, _COMPILE_KW...)
         CC.compile!(codeinfos, invokelatest_queue; invokelatest_queue, _COMPILE_KW...)
@@ -1599,7 +1600,7 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
             push!(batch, (resolved_mi, why))
             haskey(enrolled_by, resolved_mi) || (enrolled_by[resolved_mi] = batch[end][2])
         end
-        local round_lap = wt_lap()
+        local round_lap = wt_lap(options.timing)
         try
             CC.compile!(fresh_ci, fresh_wq; invokelatest_queue=fresh_ilq, _COMPILE_KW...)
             CC.compile!(fresh_ci, fresh_ilq; invokelatest_queue=fresh_ilq, _COMPILE_KW...)
@@ -1631,7 +1632,7 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
     # the loop only adds: no collected body is ever dropped (dart's worklist only adds too)
     while true
         rounds += 1
-        lap = wt_lap()
+        lap = wt_lap(options.timing)
         # the round's capture typing, over the world collected so far, before any typer reads it
         _capture_typing!(capture, codeinfos)
         wt_lap!(lap, "collect round $rounds: capture typing over $(length(codeinfos) ÷ 2) bodies")
@@ -1673,7 +1674,7 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
         changed |= collect_new_pairs!(fma_mis)
         changed || break
     end
-    wt_note("collect: $rounds rounds, $(length(codeinfos) ÷ 2) bodies")
+    wt_note(options.timing, "collect: $rounds rounds, $(length(codeinfos) ÷ 2) bodies")
 
     # WASMTARGET dynamic dispatch: discover every target admitted by the closed component.
     # It is compilation correctness and has no environment opt-out or arbitrary round/method ceiling.
@@ -1806,7 +1807,7 @@ plan_lowering_callee(plan::ClosedWorldPlan, @nospecialize(sig::Type))::Union{Not
     get(plan.lowering_callees, sig, nothing)
 
 """
-    trim_compile_plan(entries_named) -> ClosedWorldPlan
+    trim_compile_plan(entries_named; external_entries, options) -> ClosedWorldPlan
 
 Run `collect_closed_world` over the named entry points and derive the compile inputs
 (ClosedWorldPlan).
@@ -1817,7 +1818,8 @@ function entry to register) and Core/internal entries without a usable
 function object.
 parity(quarantine: Julia's trim collection (juliac --trim) is the closed world; dart's comes from its front end's whole-program type flow analysis.)
 """
-function trim_compile_plan(entries_named::Vector; external_entries::Vector=Any[])::ClosedWorldPlan
+function trim_compile_plan(entries_named::Vector; external_entries::Vector=Any[],
+                           options::CompilerOptions=options_from_env())::ClosedWorldPlan
     entry_mis = Any[]
     entry_keys = Dict{Any, String}()   # mi → requested name
     entry_values = Dict{Any,Any}()     # explicit capturing-closure instances
@@ -1837,7 +1839,8 @@ function trim_compile_plan(entries_named::Vector; external_entries::Vector=Any[]
         push!(external_leaves, (f, Tuple(arg_types), xmi))
     end
     # plan_closed_world's time is the enclosing trim_compile_plan phase's less this one
-    local world = wt_phase(() -> collect_closed_world(entry_mis; external_leaves=external_mis), "collect_closed_world")
+    local world = wt_phase(() -> collect_closed_world(entry_mis; external_leaves=external_mis, options),
+                           "collect_closed_world", options.timing)
     return plan_closed_world(world, entry_keys, entry_values, external_leaves)
 end
 

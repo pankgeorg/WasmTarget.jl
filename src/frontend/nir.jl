@@ -1010,9 +1010,9 @@ end
 function _nir_literal_text(@nospecialize(v))::String
     (v isa Number || v isa Symbol || v isa AbstractString || v isa AbstractChar || v === nothing) &&
         return repr(v)
-    v isa Type && return _type_string(v)
+    v isa Type && return string(v)
     v isa Module && return string(v)
-    return string("<", _type_string(typeof(v)), ">")
+    return string("<", typeof(v), ">")
 end
 
 # parity(pkg/kernel/lib/target/targets.dart:84 DiagnosticReporter.report): one node's printed form (see nir_text).
