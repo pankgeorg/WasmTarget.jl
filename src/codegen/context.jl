@@ -126,6 +126,7 @@ end
 # keyword call's NamedTuple carries `typeof(func_ref)` and the arity of `arg_types`, so the
 # keyword route compiled once per compiled function's type; the plan's compile loop calls
 # this one directly.
+# parity(pkg/dart2wasm/lib/code_generator.dart:28 CodeGenerator)
 function _compilation_context(body::NirBody, @nospecialize(arg_types::Tuple), @nospecialize(return_type),
                               mod::WasmModule, type_registry::TypeRegistry, translator::Translator,
                               func_registry::Union{FunctionRegistry, Nothing}, func_idx::UInt32,

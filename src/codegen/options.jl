@@ -54,6 +54,7 @@ end
 # specializations both count), and GC time, per phase. Off, every probe is one ENV read.
 # ============================================================================
 
+# parity-region(quarantine: WT_TIMING's phase probes measure the compiler's own wall, Julia-compile and GC time per phase (Base.cumulative_compile_time_ns, Base.gc_time_ns); dart2wasm's `verbose` option (translator.dart:67) prints its phases without timing them, and dart runs as an AOT snapshot with no JIT time to measure.)
 const _WT_TIMING_DEPTH = Ref(0)
 const _WT_TIMING_ON = Ref{Union{Nothing,Bool}}(nothing)
 
@@ -77,7 +78,7 @@ function _wt_lap_now()::WtLap
     return WtLap(time_ns(), c, r, Base.gc_time_ns())
 end
 
-function _wt_report(label::AbstractString, from::WtLap, depth::Int)
+function _wt_report(label::AbstractString, from::WtLap, depth::Int)::Nothing
     local now = _wt_lap_now()
     local wall = (now.t - from.t) / 1e9
     local comp = (now.compile - from.compile) / 1e9
@@ -95,7 +96,7 @@ end
 
 Run `f` as one timed phase when `WT_TIMING=1`, else just call it. Nested phases indent.
 """
-function wt_phase(f::Function, label::AbstractString)
+function wt_phase(f::Function, label::AbstractString)::Any
     wt_timing() || return f()
     local depth = _WT_TIMING_DEPTH[]
     depth == 0 && Base.cumulative_compile_timing(true)
@@ -127,6 +128,7 @@ function wt_lap!(lap::Union{Nothing,WtLap}, label::AbstractString)::Nothing
 end
 
 wt_note(msg::AbstractString)::Nothing = (wt_timing() && println(stderr, "[wt-timing] ", "  "^_WT_TIMING_DEPTH[], msg); nothing)
+# end parity-region
 
 """
     tracing(ctx, s::Symbol) -> Bool

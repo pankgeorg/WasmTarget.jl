@@ -190,6 +190,8 @@ const R30_ANY_SEAMS = Dict{Symbol,String}(
     :_nir_const_operand => "a constant operand's value, any Julia value",
     :_nir_field_name => "a getfield operand's literal, whatever the IR wrote there",
     :_runtime_composition_apply => "a runtime composition returns whatever its last function returns",
+    :wt_phase => "a timed phase returns whatever the function it times returns",
+    :_entry_field => "a field of a compile entry `(f, arg_types[, name])`: its callable (anything callable), its argument types or its name",
 )
 
 """
@@ -285,6 +287,7 @@ const R31_ALLOWLIST = Set{Tuple{Symbol,Symbol}}([
     (:NirGlobalRef, :value),            # a bound global's value — as open as a literal's
     (:NirUnsupported, :raw),            # the raw IR node the boundary could not classify — open by construction
     (:CompilationContext, :func_ref),   # the function being compiled — anything callable, as FunctionInfo.func_ref
+    (:EntryKey, :f),                    # a compile entry's callable — anything callable, as FunctionInfo.func_ref
     (:CompilationContext, :captured_constant_fields),  # a closure's captured constants, by field — open values
     (:RootBindings, :captured_constants),              # an entry closure's captured constants, by name — open values
     (:RootBindings, :bound_leaves),     # (callable, argument types) of a bound leaf — the callable is open
