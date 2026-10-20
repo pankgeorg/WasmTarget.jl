@@ -249,6 +249,7 @@ _wt_qa_include("vararg_fixed_prefix.jl")
 _wt_qa_include("symbol_syntax_metadata.jl")
 _wt_qa_include("memmove_single_path.jl")
 _wt_qa_include("host_imports.jl")
+_wt_qa_include("slot_stubs.jl")
 _wt_qa_include("immutable_objectid.jl")
 _wt_qa_include("mutable_global_initialization.jl")
 # Ground-truth string hashing: hash(::String/::SubString{String}) now bit-exact

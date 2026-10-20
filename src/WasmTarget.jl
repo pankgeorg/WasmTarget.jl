@@ -185,6 +185,7 @@ parity(pkg/dart2wasm/lib/compile.dart:216 compile)
 function _compile(functions::Vector; optimize::Union{Bool,Symbol}=false, validate::Bool=_wt_default_validate(),
                   register_ir_types::Bool=false,
                   existing_module::Union{WasmModule,Nothing}=nothing, import_stubs::Vector=Any[],
+                  slot_stubs::Vector=Any[],
                   root_bindings::Dict{String,RootBindings}=Dict{String,RootBindings}(),
                   link_roots::Union{Nothing,Function}=nothing,
                   diagnostics_sink::Union{Nothing,Vector{WasmDiagnostic}}=nothing,
@@ -194,7 +195,7 @@ function _compile(functions::Vector; optimize::Union{Bool,Symbol}=false, validat
     # the options, read once, and the caller's ledger, which mirrors every recorded
     # WasmDiagnostic (fatal and the non-fatal downgraded dependency stubs; on WasmCompileError
     # the same ledger rides the exception), are the compile's own: its Translator holds them
-    local result = compile_module(functions; existing_module, import_stubs, root_bindings, link_roots,
+    local result = compile_module(functions; existing_module, import_stubs, slot_stubs, root_bindings, link_roots,
                                   return_registries=true, register_ir_types, source_map_url, trace,
                                   options=options_from_env(), diagnostics=diagnostics_sink)
     trace === nothing || trace.entry > 0 ||
@@ -288,6 +289,12 @@ Constants go through the canonical value-materialization pipeline. Context
 elision is fail-closed: every closure field must have exactly one explicit
 substitution.
 
+`slot_stubs` entries `(stub, arg_types, return_type, root_name)` bind every call of
+`stub(arg_types...)` to the root compiled under `root_name`, in this module. Like an import
+stub, `stub` is an external leaf: its callers are inferred against its own body (which should
+neither fold nor be inlined), so the call stays a call and the root's Code entry can be replaced
+after the fact by any body of the same type.
+
 Framework runtime adapters that must reference compiled roots may use
 `link_roots(mod, root_indices, type_registry)`. It runs once after every root
 has a typed placeholder and before root bodies are emitted; adding late imports
@@ -300,11 +307,12 @@ function compile_multi(functions::Vector; optimize=false,
                        register_ir_types::Bool=false, validate::Bool=_wt_default_validate(),
                        existing_module::Union{WasmModule,Nothing}=nothing,
                        import_stubs::Vector=Any[],
+                       slot_stubs::Vector=Any[],
                        root_bindings::Dict{String,RootBindings}=Dict{String,RootBindings}(),
                        link_roots::Union{Nothing,Function}=nothing,
                        diagnostics_sink::Union{Nothing,Vector{WasmDiagnostic}}=nothing)
     local r = _compile(functions; optimize, return_registries, register_ir_types, validate,
-                       existing_module, import_stubs, root_bindings, link_roots, diagnostics_sink)
+                       existing_module, import_stubs, slot_stubs, root_bindings, link_roots, diagnostics_sink)
     return return_registries ? (r.bytes, r.registries...) : r.bytes
 end
 
