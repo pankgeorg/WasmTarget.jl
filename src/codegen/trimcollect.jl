@@ -827,8 +827,8 @@ tuple ranges over, and the classes the numbering must number.
 parity(pkg/dart2wasm/lib/class_info.dart:666 ClassInfoCollector.collect): the one class list.
 """
 closed_world_class_list(classes::ClosedWorldClasses)::Vector{DataType} =
-    sort!(DataType[C for C in classes.runtime if isconcretetype(C) && (isstructtype(C) || isprimitivetype(C))];
-          by=type_order_key)
+    ordered_by(DataType[C for C in classes.runtime if isconcretetype(C) && (isstructtype(C) || isprimitivetype(C))],
+               type_order_key)
 
 """
     class_candidates(classes) -> Vector{Any}
@@ -840,7 +840,7 @@ StaticOnly).
 parity(pkg/dart2wasm/lib/class_info.dart:666 ClassInfoCollector.collect): the one class list.
 """
 class_candidates(classes::ClosedWorldClasses)::Vector{Any} =
-    Any[closed_world_class_list(classes); sort!(collect(classes.held); by=type_order_key)]
+    Any[closed_world_class_list(classes); ordered_by(collect(classes.held), type_order_key)]
 
 """
     closed_world_classes(codeinfos, entry_mis, nir_for) -> ClosedWorldClasses
@@ -2049,7 +2049,7 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
     # each callee's no-method tuples, in one deterministic order; a planned callable with a
     # vtable whose dynamic call the collector enrolled no tuple for has its (empty) record too
     local no_method = IdDict{DataType,Vector{DataType}}(
-        F => sort!(collect(Ts); by=type_order_key) for (F, Ts) in world.no_method)
+        F => ordered_by(collect(Ts), type_order_key) for (F, Ts) in world.no_method)
     for F in planned_callables
         haskey(no_method, F) || (no_method[F] = DataType[])
     end
