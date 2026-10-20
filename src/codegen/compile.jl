@@ -225,6 +225,44 @@ function _check_import_stub_external_types!(mod::WasmModule, registry::TypeRegis
 end
 
 """
+    _bind_slot_stub!(func_registry, plan, function_data, defined_names, first_idx, (stub, arg_types, return_type, root))
+
+A `slot_stubs` entry: every call of `stub(arg_types...)` compiles as a call of the function the
+compile defines for its root named `root`. The plan cut `stub` as an external leaf, so its callers
+are inferred against the stub's own body and never against the root's: the call survives as a
+call, its result is whatever the stub's body infers to, and the root's body can be replaced in the
+emitted module without invalidating any caller. The root takes exactly `arg_types` and returns
+`return_type`, which the stub's call sites are compiled against.
+"""
+function _bind_slot_stub!(func_registry::FunctionRegistry, plan::ClosedWorldPlan, function_data::Vector,
+                          defined_names::Vector{String}, first_idx::Integer, entry)::Nothing
+    local stub, arg_types, return_type, root = entry[1], Tuple(entry[2]), entry[3], String(entry[4])
+    local i = findfirst(==(root), defined_names)
+    i === nothing && throw(ArgumentError("slot stub $(stub)$(arg_types) names the root \"$(root)\", " *
+                                         "which this compile does not define"))
+    local root_args, root_ret = Tuple(function_data[i][2]), function_data[i][5]
+    root_args == arg_types || throw(ArgumentError("slot stub $(stub)$(arg_types) is bound to the root \"$(root)\", " *
+                                                  "which takes $(root_args)"))
+    root_ret == return_type || throw(ArgumentError("slot stub $(stub)$(arg_types)::$(return_type) is bound to the " *
+                                                   "root \"$(root)\", which returns $(root_ret)"))
+    isempty(function_data[i][6]) || throw(ArgumentError("slot stub $(stub)$(arg_types) is bound to the root " *
+                                                        "\"$(root)\", which takes a WasmGlobal argument"))
+    local root_mi = function_data[i][9]
+    (haskey(plan.bespoke, root_mi) || root_mi in plan.candidate_mis || root_mi in plan.invoke_only) &&
+        throw(ArgumentError("slot stub $(stub)$(arg_types) is bound to the root \"$(root)\", whose body is not " *
+                            "an ordinary function compiled from its own IR"))
+    local leaf = findfirst(x -> x[1] === stub && x[2] == arg_types, plan.external_leaves)
+    leaf === nothing && throw(WasmInternalError(root, 0, "",
+        String["binding the slot stub $(stub)$(arg_types)"],
+        ErrorException("the plan holds no external leaf for it"), Base.StackTraces.StackFrame[]))
+    haskey(func_registry.by_mi, plan.external_leaves[leaf][3]) &&
+        throw(ArgumentError("slot stub $(stub)$(arg_types) is bound twice"))
+    register_function!(func_registry, "slot:" * root, stub, arg_types, UInt32(first_idx + i - 1), return_type;
+                       mi=plan.external_leaves[leaf][3])
+    return nothing
+end
+
+"""
 Compile a complete closed-world plan (from trim_compile_plan) into one module: register every
 function, number the closed world's classes, then emit every body. It never discovers or
 silently adds a function.
@@ -233,6 +271,7 @@ parity(pkg/dart2wasm/lib/translator.dart:524 Translator.translate)
 function _compile_closed_world_plan(plan::ClosedWorldPlan;
                         existing_module::Union{WasmModule, Nothing}=nothing,
                         import_stubs::Vector=[],
+                        slot_stubs::Vector=[],
                         root_bindings::Dict{String,RootBindings}=Dict{String,RootBindings}(),
                         link_roots::Union{Nothing,Function}=nothing,
                         return_registries::Bool=false,
@@ -250,8 +289,8 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
 
     # Filter out any discovered functions that are import stubs
     # (import stubs are registered in func_registry at their import indices, not compiled)
-    if !isempty(import_stubs)
-        import_stub_funcs = Set{Any}(entry[1] for entry in import_stubs)
+    if !isempty(import_stubs) || !isempty(slot_stubs)
+        import_stub_funcs = Set{Any}(entry[1] for entry in Iterators.flatten((import_stubs, slot_stubs)))
         functions = filter(entry -> !(entry[1] in import_stub_funcs), functions)
     end
 
@@ -613,6 +652,9 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
         # any body compiles)
         define_function!(mod, _pp, _rr; name=defined_names[i])
     end
+    for entry in slot_stubs
+        _bind_slot_stub!(func_registry, plan, function_data, defined_names, n_imports + n_existing, entry)
+    end
 
     wt_lap!(lap, "plan: declare $(length(function_data)) functions (signatures)")
     # THE CLOSURE VTABLE PRE-PASS (the index-freeze rule: nothing
@@ -868,6 +910,9 @@ function _compile_module_trim(functions::Vector; kwargs...)::Union{WasmModule, T
     end
     import_stubs = get(kwargs, :import_stubs, Any[])
     external_entries = Any[(entry[1], Tuple(entry[3])) for entry in import_stubs]
+    for entry in get(kwargs, :slot_stubs, Any[])
+        push!(external_entries, (entry[1], Tuple(entry[2])))
+    end
     root_bindings = get(kwargs, :root_bindings, Dict{String,RootBindings}())
     for bindings in values(root_bindings), (f, arg_types) in bindings.bound_leaves
         push!(external_entries, (f, arg_types))
@@ -937,6 +982,7 @@ parity(pkg/dart2wasm/lib/compile.dart:572 _runCodegenPhase)
 function compile_module(functions::Vector;
                         existing_module::Union{WasmModule, Nothing}=nothing,
                         import_stubs::Vector=[],
+                        slot_stubs::Vector=[],
                         root_bindings::Dict{String,RootBindings}=Dict{String,RootBindings}(),
                         link_roots::Union{Nothing,Function}=nothing,
                         return_registries::Bool=false,
@@ -946,7 +992,7 @@ function compile_module(functions::Vector;
                         options::CompilerOptions=options_from_env(),
                         diagnostics::Union{Nothing,Vector{WasmDiagnostic}}=nothing)::Union{WasmModule, Tuple{WasmModule, TypeRegistry, FunctionRegistry, DispatchTableRegistry}}
     return _compile_module_trim(functions;
-        existing_module, import_stubs, return_registries,
+        existing_module, import_stubs, slot_stubs, return_registries,
         root_bindings, link_roots, register_ir_types, source_map_url, trace, options, diagnostics)
 end
 
