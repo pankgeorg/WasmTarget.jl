@@ -1634,3 +1634,44 @@ first:
 - Everything else is on MARCH 13.17 under its row: A7S1's remainder (the callable created in one
   function and called in another), A12C1 (restated) and A16B5's remainder (a wide primitive in a
   parameter or a field).
+
+## 2026-10-20 — audited through 40b041c0 (baae2757..40b041c0: fece20cb..54d49805 and the compile-time batch)
+
+The seventeenth audit covers:
+- fece20cb..54d49805, seven commits: the sixteenth audit's fixes (fece20cb), one CFG (ae8f71ee),
+  a constant callee resolved once (5fab8286), one owner of a compile's state (52c0a9bd), the
+  static-array folds (117cc7dd), an invoked functor's call body (4c9fc819), every inferred body's
+  source kept (54d49805);
+- 038c9462..69a05882, the compile-time batch: the phase probes, the identity-keyed registries and
+  the positional CompilationContext, the type-string memo, the inlining-policy variant of the two
+  closed-world metadata calls, the inference knobs;
+- 71d245ff, a76bcc1c and 40b041c0, this audit's fixes.
+
+It is narrower than the sixteenth: no new native-versus-wasm programs were written. Each tree was
+checked by the parity ratchet, the smoke corpus and CI's suite, and the batch's emitted bytes
+against 54d49805's for four ODE kernels.
+
+Area: builder — no change in src/builder in the range.
+Area: collection and planning — (A17C1) The batch rewrapped the collector's invoke-edge
+statement, plan_closed_world's return and _compile_closed_world_plan's return for its timing
+probes, and the pins that name them (L40, L78, L97, L146) no longer matched; restored verbatim,
+the probes placed around them. (A17C2) MiKey restated the (mi.def, mi.specTypes) tuple keys with
+no specialization to save (the tuple's type follows the type's kind, not the type object);
+removed. (A17C3) WT_INFER_CACHE=process shared one cache partition and the collected CodeInfos
+across every compile of a process, so a retargeted :invoke of one compile stayed retargeted for
+the next: a process-wide side channel (R40); removed, with WT_INFER_PARAMS.
+Area: emission and diagnostics — (A17E1) On Julia 1.12 Compiler's src_inlining_policy is not
+given the callee, so the policy that keeps Base.isvisible and Base.check_world_bounded as :invokes
+never ran, Base's bodies were inlined, and the smoke group closed_world_reflection failed to
+compile three cases; 1.12 keeps the two overlays, 1.13 the policy. (A17E2) The type-string memo was
+process-wide, and type_order_key's text is hashed into an emitted DataType: an earlier compile
+could decide the bytes of a later one; the memo is the compile's TypeRegistry's. (A17E3) Eight
+module-level Refs and containers held compile state (R40) and three WT_* switches were read
+outside options.jl (L107); the switches are CompilerOptions fields.
+Area: enforcement and prose — (A17P1) 28 definitions without an anchor (R32), three untyped
+returns (R30), five Any fields (R31) and a docstring a comment detached from TypeRegistry (R35);
+each anchored, typed or reattached. (A17P2) The batch's seven commits were committed without a Charter
+trailer (rule 3) and were reworded to carry one; 117cc7dd, 4c9fc819 and 54d49805, earlier in the
+range, carry none and are left as they are. (A17P3) The audit chain was seven commits behind at 54d49805
+already (L148).
+Resolution: in 71d245ff, a76bcc1c and 40b041c0, and the batch's reworded messages; RESULTS PENDING.
