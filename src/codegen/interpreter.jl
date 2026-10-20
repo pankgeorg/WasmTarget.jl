@@ -534,11 +534,19 @@ end
     end
 end
 
-# Base.check_world_bounded and Base.isvisible are not overlaid: a method added to Base's own
-# table at their exact signature invalidated every compiled caller of the printing paths
-# (11,240 instances in a model process, measured 2026-10-19). Their call sites stay
-# `:invoke`s of Base's methods instead (src_inlining_policy below), which the identity-keyed
-# lowering reads; the two `_closed_world_*` bodies are the closed world's own callable copies.
+# Base.check_world_bounded and Base.isvisible: on Julia 1.13 their call sites stay `:invoke`s of
+# Base's methods (src_inlining_policy below), which the identity-keyed lowering reads, since a
+# method at Base's exact signature invalidates every compiled caller of the printing paths when
+# WasmTarget loads. Julia 1.12's src_inlining_policy is not given the callee, so there the two
+# overlays below answer from the closed world's metadata. The two `_closed_world_*` bodies are
+# the closed world's own callable copies.
+@static if VERSION < v"1.13-"
+# parity(quarantine: Julia's check_world_bounded walks the TypeName's binding partitions at run
+# time; the closed module has one world, WASM_WORLD_AGE, and answers from compile-time metadata.)
+@noinline @overlay WASM_METHOD_TABLE function Base.check_world_bounded(tn::Core.TypeName)
+    return _closed_world_type_bounds(tn)
+end
+end
 
 # parity(quarantine: Julia's isvisible walks binding partitions at run time; the closed module
 # has one world, answered from compile-time metadata.)
@@ -561,6 +569,15 @@ end
         return parent_partition.restriction === from_partition.restriction
     end
     return false
+end
+
+@static if VERSION < v"1.13-"
+# parity(quarantine: Julia's isvisible walks binding partitions at the current world; the closed
+# module has one world and answers from compile-time binding metadata.)
+@noinline @overlay WASM_METHOD_TABLE function Base.isvisible(sym::Symbol, parent::Module,
+                                                              from::Module)
+    return _closed_world_isvisible(sym, parent, from)
+end
 end
 
 # Why: `Base.nonnothing_nonmissing_typeinfo(io) =
@@ -1608,6 +1625,7 @@ end
 # reason: everything else is the general rule above.
 _wt_forced_concrete_eval(@nospecialize(f))::Bool = f === _wt_type_name_str
 
+@static if VERSION >= v"1.13-"
 # The closed-world metadata operations (Base.isvisible, Base.check_world_bounded) are never
 # inlined into a body WT infers: their call sites are lowered by callee identity to the answer
 # the TypeName constant carries (builtins.jl _lower_isvisible!, _lower_check_world_bounded!),
@@ -1626,6 +1644,7 @@ function CC.src_inlining_policy(interp::WasmInterpreter, mi::Core.MethodInstance
     def isa Method && _wt_closed_world_metadata_method(def) && return false
     return @invoke CC.src_inlining_policy(interp::CC.AbstractInterpreter, mi::Core.MethodInstance,
                                           src, info, stmt_flag)
+end
 end
 
 function CC.concrete_eval_eligible(interp::WasmInterpreter,
