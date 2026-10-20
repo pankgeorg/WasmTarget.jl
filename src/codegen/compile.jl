@@ -257,7 +257,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
 
     # the framework's predeclared module (checked at the compile's entry, before collection:
     # check_existing_module), else a new one
-    local lap = wt_lap()
+    local lap = wt_lap(options.timing)
     mod = existing_module !== nothing ? existing_module :
           WasmModule(; source_map_url, builder_trace=options.builder_trace)
     # a module with a host-declared import imports the count of its open calls, which the host's
@@ -727,7 +727,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
     local compile_exports = Tuple{String,UInt32}[]
 
     wt_lap!(lap, "plan: dispatch tables")
-    local body_lap = wt_lap()
+    local body_lap = wt_lap(options.timing)
     # Second pass: fill each defined function with its body
     for (i, (f, arg_types, name, _, return_type, global_args, is_closure, fn_nir)) in enumerate(function_data)
         func_idx = UInt32(n_imports + n_existing + i - 1)
@@ -803,7 +803,7 @@ function _compile_closed_world_plan(plan::ClosedWorldPlan;
         fill_function!(mod, func_idx, b)
         push!(compile_exports, (defined_names[i], func_idx))
         # per-body laps with WT_TIMING_BODIES=1 (a statement count sizes each body)
-        get(ENV, "WT_TIMING_BODIES", "") == "1" &&
+        options.timing_bodies &&
             wt_lap!(body_lap, "body $(name) ($(fn_nir === nothing ? 0 : length(fn_nir.stmts)) stmts)")
     end
     wt_lap!(lap, "codegen: $(length(function_data)) bodies")
@@ -897,7 +897,9 @@ function _compile_module_trim(functions::Vector; kwargs...)::Union{WasmModule, T
     existing === nothing || check_existing_module(existing, get(kwargs, :source_map_url, nothing),
                                                   kwargs[:options])
     try
-        plan = wt_phase(() -> trim_compile_plan(normalized; external_entries), "trim_compile_plan")
+        local options = kwargs[:options]
+        plan = wt_phase(() -> trim_compile_plan(normalized; external_entries, options), "trim_compile_plan",
+                        options.timing)
         return _compile_closed_world_plan(plan; kwargs...)
     catch err
         # a failure outside any statement — collecting the closed world, registering its
@@ -945,9 +947,11 @@ function compile_module(functions::Vector;
                         trace::Union{Nothing,StatementTrace}=nothing,
                         options::CompilerOptions=options_from_env(),
                         diagnostics::Union{Nothing,Vector{WasmDiagnostic}}=nothing)::Union{WasmModule, Tuple{WasmModule, TypeRegistry, FunctionRegistry, DispatchTableRegistry}}
-    return _compile_module_trim(functions;
-        existing_module, import_stubs, return_registries,
-        root_bindings, link_roots, register_ir_types, source_map_url, trace, options, diagnostics)
+    return wt_phase("compile_module", options.timing) do
+        _compile_module_trim(functions;
+            existing_module, import_stubs, return_registries,
+            root_bindings, link_roots, register_ir_types, source_map_url, trace, options, diagnostics)
+    end
 end
 
 # _collect_reachable_ir_types (Phase 12B, the closed-world type collector) lives in

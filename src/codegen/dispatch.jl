@@ -329,7 +329,7 @@ function emit_dispatch_wrappers!(mod::WasmModule,
             for (j, tid) in enumerate(entry.type_ids)
                 # Find the concrete Julia type for this typeId
                 concrete_type = nothing
-                for (T, id) in ordered_pairs(type_registry.type_ids, type_order_key)
+                for (T, id) in ordered_pairs(type_registry.type_ids, TypeOrderKey(type_registry))
                     if id == tid
                         concrete_type = T
                         break
