@@ -1439,7 +1439,7 @@ inference-result cache, handed to every interpreter the collection makes (collec
 A `fresh` collection hands each round its own.
 """
 struct CollectionCache
-    token::Any
+    token::Base.RefValue{Int}
     codegen::IdDict{Core.CodeInstance, Core.CodeInfo}
     inf_cache::Vector{CC.InferenceResult}
 end

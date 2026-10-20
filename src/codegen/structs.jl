@@ -322,12 +322,8 @@ function _register_struct_type_inner!(mod::WasmModule, registry::TypeRegistry, T
     # recorded, then its fields translate — a field reaching it again refers to it (pending
     # until its recursion group is added, finish_pending!).
     local id = begin_pending!(registry, :structs, T)
-    local info_names, info_types = Symbol[], Type[]
-    for i in 1:fieldcount(T)
-        push!(info_names, fieldname(T, i))
-        push!(info_types, fieldtype(T, i))
-    end
-    registry.structs[T] = StructInfo(T, id, info_names, info_types, UInt32(2))
+    registry.structs[T] = StructInfo(T, id, Symbol[fieldname(T, i) for i in 1:fieldcount(T)],
+                                     Type[fieldtype(T, i) for i in 1:fieldcount(T)], UInt32(2))
     local wasm_fields = _struct_fields!(mod, registry, T)
     # step5 THE CLASS-DAG: the struct subtypes its nearest abstract parent's synthetic
     # (dart class_info.dart:420 _createStructForClass), created parent-first at registration.

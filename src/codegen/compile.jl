@@ -898,7 +898,7 @@ function _compile_module_trim(functions::Vector; kwargs...)::Union{WasmModule, T
                                                   kwargs[:options])
     try
         plan = wt_phase(() -> trim_compile_plan(normalized; external_entries), "trim_compile_plan")
-        return wt_phase(() -> _compile_closed_world_plan(plan; kwargs...), "_compile_closed_world_plan")
+        return _compile_closed_world_plan(plan; kwargs...)
     catch err
         # a failure outside any statement — collecting the closed world, registering its
         # types, building its dispatch tables, declaring its functions — located at the

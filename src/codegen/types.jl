@@ -521,14 +521,15 @@ end
 """
 Registry for struct and array type mappings within a module.
 
+The type-keyed maps compare keys with isequal (type equality): two type objects that are equal
+but not egal — a parametric body over different TypeVars — are one key. A Dict method compiles
+once per type object it is handed as Type{X}; the walks that hand it one (the class numbering,
+the class set, the reachable types) widen the type to its kind first, so each container call is
+the one static method.
+
 parity(translator.dart:96 Translator): the translator's per-compile type state — classInfo
 (:186), the array type caches (:231), and the constant map (constants.dart:154 constantInfo).
 """
-# The type-keyed maps compare keys with isequal (type equality): two type objects that are
-# equal but not egal — a parametric body over different TypeVars — are one key. A Dict method
-# compiles once per type object it is handed as Type{X}; the walks that hand it one (the class
-# numbering, the class set, the reachable types) widen the type to its kind first, so each
-# container call is the one static method.
 mutable struct TypeRegistry
     structs::Dict{Type, StructInfo}  # DataType or UnionAll for parametric types
     arrays::Dict{Type, UInt32}  # Element type -> array type index

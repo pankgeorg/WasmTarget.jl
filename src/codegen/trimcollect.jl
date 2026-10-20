@@ -127,6 +127,7 @@ function _match_is_one_signature(m::Core.MethodMatch)::Bool
     return true
 end
 
+# parity-region(quarantine: a Dict or Set keyed by the tuple `(f, args)` compiles hash and isequal once per callable type; the key struct hashes the callable through the unspecialized fallback instead. dart keys a function by its member's Reference (functions.dart:90).)
 """
     EntryKey(f, args)
 
@@ -136,32 +137,19 @@ specializes a container method on the callable's type.
 """
 struct EntryKey
     f::Any
-    args::Any      # a Tuple of types
+    args::Tuple    # the argument types
 end
 Base.hash(k::EntryKey, h::UInt)::UInt = hash(k.args, hash(k.f, h))
 Base.isequal(a::EntryKey, b::EntryKey)::Bool =
     (a.f === b.f || (a.f isa Type && b.f isa Type && a.f == b.f)) && isequal(a.args, b.args)
 Base.:(==)(a::EntryKey, b::EntryKey)::Bool = isequal(a, b)
-
-"""
-    MiKey(mi)
-
-A MethodInstance's method and signature as a key: two MethodInstance objects of one method at
-one signature are one key (Compiler may hand out a fresh object for the same overlay
-specialization). Typed `Any` so no key specializes a container method on the signature.
-"""
-struct MiKey
-    def::Any
-    spec::Any
-end
-MiKey(mi::Core.MethodInstance)::MiKey = MiKey(mi.def, mi.specTypes)
-Base.hash(k::MiKey, h::UInt)::UInt = hash(k.spec, hash(k.def, h))
-Base.isequal(a::MiKey, b::MiKey)::Bool = a.def === b.def && a.spec == b.spec
-Base.:(==)(a::MiKey, b::MiKey)::Bool = isequal(a, b)
+# end parity-region
 
 # the fields of a compile entry `(f, arg_types[, name])`, read without specializing on the
 # tuple's type (getfield is a builtin; destructuring or getindex compiles per tuple type)
-_entry_field(@nospecialize(e), i::Int) = e isa Tuple ? getfield(e, i) : e[i]
+# parity(quarantine: a compile entry is the caller's tuple `(f, arg_types[, name])`, read with the getfield builtin so no read specializes on the tuple's type; dart's entry points are kernel members, not values.)
+_entry_field(@nospecialize(e), i::Int)::Any = e isa Tuple ? getfield(e, i) : e[i]
+# parity(quarantine: the same entry tuple's length, read without specializing on its type.)
 _entry_nfields(@nospecialize(e))::Int = e isa Tuple ? nfields(e) : length(e)
 
 # the most candidate tuples one dynamic call enumerates or the ambiguity search asks about
@@ -1540,8 +1528,8 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
     # `Function` argument). A closed world cannot defer that edge to codegen.
     # Enroll every edge's target (_closed_world_edge) to a fixpoint before selector discovery.
     base_mis = Set{Any}()
-    mi_key(mi) = MiKey(mi)
-    base_mi_keys = Set{MiKey}()
+    mi_key(mi) = (mi.def, mi.specTypes)
+    base_mi_keys = Set{Any}()
     for (_, mi, _) in _collected_pairs(codeinfos)
         push!(base_mis, mi)
         push!(base_mi_keys, mi_key(mi))
@@ -1647,12 +1635,10 @@ function collect_closed_world(entries::Vector{Any}; verify::Bool=false,
         # the round's capture typing, over the world collected so far, before any typer reads it
         _capture_typing!(capture, codeinfos)
         wt_lap!(lap, "collect round $rounds: capture typing over $(length(codeinfos) ÷ 2) bodies")
-        local invoke_roots = _missing_explicit_invoke_mis(
+        changed = collect_new_pairs!(_missing_explicit_invoke_mis(
             codeinfos, invoke_seen; numeric_joins, capture, reasons=enrolled_by, invoked_closures,
-            invoke_originals)
-        wt_lap!(lap, "collect round $rounds: invoke edges ($(length(invoke_roots)) missing)")
-        changed = collect_new_pairs!(invoke_roots)
-        lap = wt_lap()
+            invoke_originals))
+        wt_lap!(lap, "collect round $rounds: invoke edges and their roots")
 
         # one NIR per collected CodeInfo for this round's two walks (the class set, then the
         # candidates); round-local: `_missing_explicit_invoke_mis` re-targets invoke edges in place
@@ -1850,8 +1836,9 @@ function trim_compile_plan(entries_named::Vector; external_entries::Vector=Any[]
         push!(external_mis, xmi)
         push!(external_leaves, (f, Tuple(arg_types), xmi))
     end
+    # plan_closed_world's time is the enclosing trim_compile_plan phase's less this one
     local world = wt_phase(() -> collect_closed_world(entry_mis; external_leaves=external_mis), "collect_closed_world")
-    return wt_phase(() -> plan_closed_world(world, entry_keys, entry_values, external_leaves), "plan_closed_world")
+    return plan_closed_world(world, entry_keys, entry_values, external_leaves)
 end
 
 """
@@ -1869,10 +1856,10 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
 
     functions = Any[]
     ir_cache = IdDict{Core.MethodInstance, Tuple{Core.CodeInfo, Type}}()
-    collected_method_specs = Set{MiKey}()
+    collected_method_specs = Set{Any}()
     local pairs = _collected_pairs(codeinfos)
     for (_, cmi, _) in pairs
-        push!(collected_method_specs, MiKey(cmi))
+        push!(collected_method_specs, (cmi.def, cmi.specTypes))
     end
     # A capturing closure a collected body invokes statically (Base's reallocating
     # `_growend!`/`_growbeg!` closures) is a direct call of a known method: its body is
@@ -1900,7 +1887,7 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
     # One function per MethodInstance (dart keys a function by its member's Reference). Two
     # methods can share one specialization's argument types — Base calls a less specific
     # method with `invoke(f, Tuple{Super}, x)` — so (f, arg_types) does not name a function.
-    seen_mis = Set{MiKey}()                    # (mi.def, mi.specTypes)
+    seen_mis = Set{Tuple{Any, Any}}()          # (mi.def, mi.specTypes)
     mis_by_sig = Dict{EntryKey, Vector{Any}}()
     # each planned body's joins, read by codegen (numeric_local_joins): its numeric joins and its
     # capture reads, each computed once in collection (ClosedWorld's numeric_joins, capture)
@@ -1965,7 +1952,7 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
                 local canonical_args = Tuple(canonical_list)
                 local canonical_sig = Tuple{sig.parameters[1], canonical_args...}
                 if canonical_args != arg_types &&
-                   MiKey(mi.def, canonical_sig) in collected_method_specs
+                   (mi.def, canonical_sig) in collected_method_specs
                     continue
                 end
             end
@@ -1998,8 +1985,8 @@ function plan_closed_world(world::ClosedWorld, entry_keys::Dict{Any,String}, ent
          arg_types == (Symbol, Module, Module)) && continue
         # a discovery candidate can repeat an explicitly listed specialization (the first
         # occurrence wins: entries are processed first)
-        (MiKey(mi) in seen_mis) && continue
-        push!(seen_mis, MiKey(mi))
+        ((mi.def, mi.specTypes) in seen_mis) && continue
+        push!(seen_mis, (mi.def, mi.specTypes))
         push!(get!(Vector{Any}, mis_by_sig, EntryKey(f, arg_types)), mi)
         # name: requested for entries, deduped method name otherwise
         name = get(entry_keys, mi, nothing)
