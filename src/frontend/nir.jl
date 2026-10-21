@@ -1005,47 +1005,48 @@ end
 
 # a literal's printed form: `repr` for a number, symbol, string, char or nothing; a type, a
 # function or any other value — a static array, a struct constant — by its type's text, since
-# `repr` of it compiles a show method per type (measured 0.6 s of a model's first compile)
+# `repr` of it compiles a show method per type (measured 0.6 s of a model's first compile);
+# `typetext` prints a type (a compile's memo, TypeRegistry's `_type_string`, or `string`)
 # parity(pkg/kernel/lib/target/targets.dart:84 DiagnosticReporter.report): one node's printed form (see nir_text).
-function _nir_literal_text(@nospecialize(v))::String
+function _nir_literal_text(@nospecialize(v), typetext)::String
     (v isa Number || v isa Symbol || v isa AbstractString || v isa AbstractChar || v === nothing) &&
         return repr(v)
-    v isa Type && return string(v)
+    v isa Type && return typetext(v)::String
     v isa Module && return string(v)
-    return string("<", typeof(v), ">")
+    return string("<", typetext(typeof(v))::String, ">")
 end
 
 # parity(pkg/kernel/lib/target/targets.dart:84 DiagnosticReporter.report): one node's printed form (see nir_text).
-function _nir_text(x)::String
+function _nir_text(x, typetext = string)::String
     x === nothing && return "#undef"
     x isa NirSSA && return string("%", x.id)
     (x isa NirArgument) && return string("_", x.n)
     (x isa NirSlot) && return string("_", x.id)
     x isa NirGlobalRef && return string(x.mod, ".", x.name)
-    x isa NirLiteral && return _nir_literal_text(x.value)
-    _args(ops) = join((_nir_text(o) for o in ops), ", ")
-    _callee(c) = c isa NirNode ? _nir_text(c) : string(c)
+    x isa NirLiteral && return _nir_literal_text(x.value, typetext)
+    _args(ops) = join((_nir_text(o, typetext) for o in ops), ", ")
+    _callee(c) = c isa NirNode ? _nir_text(c, typetext) : string(c)
     x isa NirCall && return string(_callee(x.callee), "(", _args(x.operands), ")")
     x isa NirInvoke && return string("invoke ", x.mi === nothing ? _callee(x.callee) : string(x.mi),
                                      "(", _args(x.operands), ")")
     x isa NirNew && return string("%new(", x.T, isempty(x.operands) ? "" : ", ", _args(x.operands), ")")
     x isa NirForeignCall && return string("foreigncall(", repr(x.c_symbol),
                                           isempty(x.operands) ? "" : ", ", _args(x.operands), ")")
-    x isa NirReturn && return string("return ", _nir_text(x.value))
+    x isa NirReturn && return string("return ", _nir_text(x.value, typetext))
     x isa NirGoto && return string("goto #", x.target)
-    x isa NirGotoIfNot && return string("goto #", x.target, " if not ", _nir_text(x.cond))
-    x isa NirPhi && return string("φ (", join((string("#", e, " => ", _nir_text(v))
+    x isa NirGotoIfNot && return string("goto #", x.target, " if not ", _nir_text(x.cond, typetext))
+    x isa NirPhi && return string("φ (", join((string("#", e, " => ", _nir_text(v, typetext))
                                               for (e, v) in zip(x.edges, x.values)), ", "), ")")
-    x isa NirPi && return string("π (", _nir_text(x.value), ", ", x.typ, ")")
+    x isa NirPi && return string("π (", _nir_text(x.value, typetext), ", ", x.typ, ")")
     x isa NirEnter && return string("enter #", x.catch_target)
     x isa NirLeave && return string("leave ", _args(x.enters))
-    x isa NirPopException && return string("pop_exception ", _nir_text(x.enter))
+    x isa NirPopException && return string("pop_exception ", _nir_text(x.enter, typetext))
     x isa NirTheException && return "the_exception"
     x isa NirBoundscheck && return string("boundscheck(", x.flag === nothing ? "" : x.flag, ")")
-    x isa NirThrowUndefIfNot && return string("throw_undef_if_not(", repr(x.var), ", ", _nir_text(x.cond), ")")
+    x isa NirThrowUndefIfNot && return string("throw_undef_if_not(", repr(x.var), ", ", _nir_text(x.cond, typetext), ")")
     x isa NirNewvar && return string("newvar _", x.slot)
     x isa NirNoOp && return string(x.kind, "(", _args(x.operands), ")")
-    x isa NirUpsilon && return string("ϒ (", _nir_text(x.value), ")")
+    x isa NirUpsilon && return string("ϒ (", _nir_text(x.value, typetext), ")")
     x isa NirPhiC && return string("φᶜ (", _args(x.values), ")")
     x isa NirUnsupported && return string(x.raw)
     return string(x)

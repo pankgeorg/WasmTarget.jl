@@ -2896,7 +2896,7 @@ parity(pkg/dart2wasm/lib/intrinsics.dart:1194 Intrinsifier.generateStaticIntrins
 """
 function compile_call!(b::InstrBuilder, node::NirCall, idx::Int, ctx::AbstractCompilationContext)::InstrBuilder
     fb = _ctx_builder(ctx, "compile_call.frag")
-    set_context!(fb, first(_nir_text(node), 80))   # errors name the call
+    set_context!(fb, first(_nir_text(node, T -> _type_string(ctx.type_registry, T)), 80))   # errors name the call
     # A call may consume values stack-threaded by the enclosing statement fragment.
     # Preserve that tracked input across this second fragment boundary just as
     # compile_statement! preserves the parent builder's input. Without it, Julia
