@@ -611,7 +611,7 @@ function _compile_statement_located!(b::InstrBuilder, idx::Int, ctx::AbstractCom
         # stmt_bytes = its serialization — byte-identical while the byte tail migrates
         # to _sf's tracked state cluster-by-cluster (dev/HISTORY.md#exceptions-and-structured-control-flow).
         local _sf = _ctx_builder(ctx, "compile_statement.frag")
-        set_context!(_sf, first(_nir_text(node), 80))   # errors name the stmt
+        set_context!(_sf, first(_nir_text(node, T -> _type_string(ctx.type_registry, T)), 80))   # errors name the stmt
         # Statements legitimately consume values earlier statements left on
         # the wasm stack (the stackified model) — seed the fragment with the parent's
         # TRACKED stack so pops resolve; append_builder! settles the contract exactly.
